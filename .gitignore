@@ -1,0 +1,35 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE files
+.idea/
+.vscode/
+
+# Local app data and imported datasets
+data/app.db
+data/*.db
+data/videos/
+data/mat/
+*.mp4
+*.MP4
+*.avi
+*.mov
+*.mkv
+*.mat
+
+# Build outputs
+build/
+dist/
+*.spec
+
+# Logs and local temp files
+*.log
+*.tmp
+*.bak

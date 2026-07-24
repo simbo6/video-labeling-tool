@@ -23,6 +23,9 @@ except ImportError:
 
 EEG_PAD_BEFORE_SEC = 25.0
 EEG_PAD_AFTER_SEC = 35.0
+VIDEO_MOTION_PAD_BEFORE_SEC = 3 * 60.0
+VIDEO_MOTION_PAD_AFTER_SEC = 2 * 60.0
+WATCH_SEARCH_PAD_SEC = 15 * 60.0
 TEMPLATE_CONTEXT_BEFORE_SEC = 12.0
 TEMPLATE_CONTEXT_AFTER_SEC = 18.0
 SHORT_SMOOTH_SEC = 1.0
@@ -31,15 +34,24 @@ BURST_SMOOTH_SEC = 1.5
 MASK_SMOOTH_SEC = 2.0
 MIN_EVENT_DURATION_SEC = 8.0
 MAX_TEMPLATE_DURATION_SEC = 140.0
-DEFAULT_MAX_OFFSET_SECONDS = 15 * 60
+DEFAULT_MAX_OFFSET_SECONDS = WATCH_SEARCH_PAD_SEC
 DEFAULT_TARGET_FS = 5.0
 DEFAULT_ROI_MAX_WIDTH = 240
+
+
+class OffsetEstimationCancelled(RuntimeError):
+    """用户取消自动偏移估计。"""
 
 
 def _report_progress(progress_callback, percent, message):
     """向外报告当前计算进度。"""
     if progress_callback is not None:
         progress_callback(int(max(0, min(100, percent))), str(message or ""))
+
+
+def _check_cancel(cancel_callback):
+    if cancel_callback is not None and cancel_callback():
+        raise OffsetEstimationCancelled("已取消自动偏移估计")
 
 
 def read_video_first_frame(video_path):
@@ -216,7 +228,16 @@ def detect_tracking_points(gray):
     )
 
 
-def compute_video_motion_series(video_file, roi, target_fs, roi_max_width, progress_callback=None):
+def compute_video_motion_series(
+    video_file,
+    roi,
+    target_fs,
+    roi_max_width,
+    start_sec=0.0,
+    end_sec=None,
+    progress_callback=None,
+    cancel_callback=None,
+):
     cap = cv2.VideoCapture(video_file)
     if not cap.isOpened():
         raise RuntimeError(f"无法打开视频：{video_file}")
@@ -228,8 +249,19 @@ def compute_video_motion_series(video_file, roi, target_fs, roi_max_width, progr
         raise RuntimeError("无法读取视频 FPS")
 
     duration_sec = frame_count / fps
+    window_start_sec = max(0.0, float(start_sec or 0.0))
+    window_end_sec = duration_sec if end_sec is None else min(duration_sec, float(end_sec))
+    if window_end_sec <= window_start_sec:
+        cap.release()
+        raise RuntimeError("视频局部计算窗口无效")
+
+    start_frame = min(frame_count - 1, max(0, int(np.floor(window_start_sec * fps))))
+    end_frame = min(frame_count, max(start_frame + 1, int(np.ceil(window_end_sec * fps))))
+    window_start_sec = start_frame / fps
+    window_end_sec = end_frame / fps
     step = max(1, int(round(fps / target_fs)))
 
+    cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
     ok, frame = cap.read()
     if not ok:
         cap.release()
@@ -242,18 +274,21 @@ def compute_video_motion_series(video_file, roi, target_fs, roi_max_width, progr
     flow_values = []
     diff_values = []
     point_counts = []
-    frame_idx = 0
+    frame_idx = start_frame
     last_progress = -1
 
     _report_progress(progress_callback, 25, "正在分析视频 ROI 运动特征...")
 
     while True:
+        _check_cancel(cancel_callback)
         ok, frame = cap.read()
         if not ok:
             break
 
         frame_idx += 1
-        if frame_idx % step != 0:
+        if frame_idx >= end_frame:
+            break
+        if (frame_idx - start_frame) % step != 0:
             continue
 
         gray = preprocess_roi_gray(frame, roi, roi_max_width)
@@ -297,7 +332,7 @@ def compute_video_motion_series(video_file, roi, target_fs, roi_max_width, progr
         point_counts.append(valid_count)
         prev_gray = gray
 
-        current_progress = 25 + int(45 * frame_idx / max(frame_count - 1, 1))
+        current_progress = 25 + int(45 * (frame_idx - start_frame) / max(end_frame - start_frame - 1, 1))
         if current_progress != last_progress:
             last_progress = current_progress
             _report_progress(progress_callback, current_progress, f"正在分析视频 ROI... {current_progress}%")
@@ -312,16 +347,20 @@ def compute_video_motion_series(video_file, roi, target_fs, roi_max_width, progr
     diff_values = np.asarray(diff_values, dtype=np.float64)
     point_counts = np.asarray(point_counts, dtype=np.float64)
 
-    t_uniform, flow_uniform = resample_by_time(sampled_times, flow_values, target_fs, duration_sec)
-    _, diff_uniform = resample_by_time(sampled_times, diff_values, target_fs, duration_sec)
-    _, points_uniform = resample_by_time(sampled_times, point_counts, target_fs, duration_sec)
+    local_times = sampled_times - window_start_sec
+    window_duration_sec = window_end_sec - window_start_sec
+    t_uniform, flow_uniform = resample_by_time(local_times, flow_values, target_fs, window_duration_sec)
+    _, diff_uniform = resample_by_time(local_times, diff_values, target_fs, window_duration_sec)
+    _, points_uniform = resample_by_time(local_times, point_counts, target_fs, window_duration_sec)
     return {
-        "time": t_uniform,
+        "time": t_uniform + window_start_sec,
         "flow": flow_uniform,
         "diff": diff_uniform,
         "points": points_uniform,
         "fps": fps,
         "duration_sec": duration_sec,
+        "window_start_sec": window_start_sec,
+        "window_end_sec": window_end_sec,
     }
 
 
@@ -333,7 +372,15 @@ def build_video_feature(video_motion, fs):
     return raw_mix, feature
 
 
-def build_imu_feature(mat_path, mode, target_fs, acc_fs=100.0, gyro_fs=100.0, progress_callback=None):
+def build_imu_feature(
+    mat_path,
+    mode,
+    target_fs,
+    acc_fs=100.0,
+    gyro_fs=100.0,
+    progress_callback=None,
+    cancel_callback=None,
+):
     _report_progress(progress_callback, 10, "正在读取腕表数据...")
     mat = loadmat(mat_path)
     if "data" not in mat:
@@ -353,6 +400,7 @@ def build_imu_feature(mat_path, mode, target_fs, acc_fs=100.0, gyro_fs=100.0, pr
     gyr_filtered = np.empty_like(gyr_raw, dtype=np.float64)
 
     for axis in range(3):
+        _check_cancel(cancel_callback)
         _report_progress(progress_callback, 12 + axis * 3, f"正在滤波腕表加速度/角速度... {axis + 1}/3")
         acc_filtered[:, axis] = filter_acc(acc_raw[:, axis], fs=acc_fs)
         gyr_filtered[:, axis] = filter_gyr(gyr_raw[:, axis], fs=gyro_fs)
@@ -412,9 +460,10 @@ def find_segments(mask):
     return segments
 
 
-def detect_main_event_block(feature, fs, eeg_start_sec, eeg_end_sec):
-    eeg_lo = max(0, int(round((eeg_start_sec - EEG_PAD_BEFORE_SEC) * fs)))
-    eeg_hi = min(len(feature), int(round((eeg_end_sec + EEG_PAD_AFTER_SEC) * fs)))
+def detect_main_event_block(feature, fs, eeg_start_sec, eeg_end_sec, feature_start_sec=0.0):
+    feature_start_sec = float(feature_start_sec or 0.0)
+    eeg_lo = max(0, int(round((eeg_start_sec - EEG_PAD_BEFORE_SEC - feature_start_sec) * fs)))
+    eeg_hi = min(len(feature), int(round((eeg_end_sec + EEG_PAD_AFTER_SEC - feature_start_sec) * fs)))
     if eeg_hi - eeg_lo < int(10 * fs):
         raise RuntimeError("脑电参考时间窗太短，无法稳定定位主异常块")
 
@@ -479,7 +528,7 @@ def detect_main_event_block(feature, fs, eeg_start_sec, eeg_end_sec):
         "core_end": core_end_abs,
         "main_start": main_start_abs,
         "main_end": main_end_abs,
-        "peak_time_sec": (eeg_lo + peak_rel) / fs,
+        "peak_time_sec": feature_start_sec + (eeg_lo + peak_rel) / fs,
         "template_start": tmpl_start,
         "template_end": tmpl_end,
     }
@@ -491,7 +540,17 @@ def normalized_corr_valid(target, template):
     return np.correlate(target_z, template_z, mode="valid") / max(len(template_z), 1)
 
 
-def bounded_offset_search(video_feature, wrist_feature, fs, block_info, max_offset_sec):
+def bounded_offset_search(
+    video_feature,
+    wrist_feature,
+    fs,
+    block_info,
+    max_offset_sec,
+    video_start_sec=0.0,
+    eeg_start_sec=None,
+    eeg_end_sec=None,
+    wrist_start_relative_sec=None,
+):
     tmpl_start = int(block_info["template_start"])
     tmpl_end = int(block_info["template_end"])
     template = video_feature[tmpl_start:tmpl_end]
@@ -510,9 +569,21 @@ def bounded_offset_search(video_feature, wrist_feature, fs, block_info, max_offs
     mask_corr = normalized_corr_valid(wrist_mask, video_mask[tmpl_start:tmpl_end])
     peak_corr = normalized_corr_valid(wrist_peak, video_peak[tmpl_start:tmpl_end])
 
-    positions = np.arange(len(raw_corr), dtype=np.float64)
-    offsets = (positions - tmpl_start) / fs
-    valid = np.abs(offsets) <= max_offset_sec
+    positions = np.arange(len(raw_corr), dtype=np.float64) / fs
+    video_template_start_sec = float(video_start_sec or 0.0) + tmpl_start / fs
+    offsets = positions - video_template_start_sec
+    if (
+        wrist_start_relative_sec is not None
+        and eeg_start_sec is not None
+        and eeg_end_sec is not None
+    ):
+        search_start = float(eeg_start_sec) - float(max_offset_sec) - float(wrist_start_relative_sec)
+        search_end = float(eeg_end_sec) + float(max_offset_sec) - float(wrist_start_relative_sec)
+        valid = (positions >= search_start) & (positions <= search_end)
+    else:
+        search_start = video_template_start_sec - float(max_offset_sec)
+        search_end = video_template_start_sec + float(max_offset_sec)
+        valid = np.abs(offsets) <= max_offset_sec
     if not np.any(valid):
         raise RuntimeError("限定偏移范围后没有可搜索区间，请检查最大偏移范围")
 
@@ -567,6 +638,8 @@ def bounded_offset_search(video_feature, wrist_feature, fs, block_info, max_offs
         "peak_peak_offset": peak_peak_offset,
         "grad_peak_offset": grad_peak_offset,
         "mask_peak_offset": mask_peak_offset,
+        "search_start_seconds": float(search_start),
+        "search_end_seconds": float(search_end),
     }
 
 
@@ -584,7 +657,11 @@ def estimate_video_watch_offset(
     gyro_fs=None,
     max_offset_seconds=DEFAULT_MAX_OFFSET_SECONDS,
     roi_max_width=DEFAULT_ROI_MAX_WIDTH,
+    wrist_start_relative_sec=None,
+    video_motion_pad_before_sec=VIDEO_MOTION_PAD_BEFORE_SEC,
+    video_motion_pad_after_sec=VIDEO_MOTION_PAD_AFTER_SEC,
     progress_callback=None,
+    cancel_callback=None,
 ):
     """基于手动 ROI 和脑电参考时间窗估计视频到腕表数据的偏移量。"""
     del frame_scale
@@ -616,22 +693,33 @@ def estimate_video_watch_offset(
         acc_fs=acc_fs,
         gyro_fs=gyro_fs,
         progress_callback=progress_callback,
+        cancel_callback=cancel_callback,
     )
 
     _report_progress(progress_callback, 22, "正在提取视频 ROI 序列...")
+    _check_cancel(cancel_callback)
     video_motion = compute_video_motion_series(
         video_path,
         roi=roi,
         target_fs=target_fs,
         roi_max_width=int(roi_max_width),
+        start_sec=max(0.0, float(eeg_start_sec) - float(video_motion_pad_before_sec)),
+        end_sec=float(eeg_end_sec) + float(video_motion_pad_after_sec),
         progress_callback=progress_callback,
+        cancel_callback=cancel_callback,
     )
 
     _report_progress(progress_callback, 72, "正在构建视频特征...")
     _, video_feature = build_video_feature(video_motion, target_fs)
 
     _report_progress(progress_callback, 82, "正在根据脑电参考时间定位视频异常块...")
-    block_info = detect_main_event_block(video_feature, target_fs, float(eeg_start_sec), float(eeg_end_sec))
+    block_info = detect_main_event_block(
+        video_feature,
+        target_fs,
+        float(eeg_start_sec),
+        float(eeg_end_sec),
+        feature_start_sec=video_motion["window_start_sec"],
+    )
 
     _report_progress(progress_callback, 92, "正在搜索最佳偏移量...")
     search_result = bounded_offset_search(
@@ -640,6 +728,10 @@ def estimate_video_watch_offset(
         fs=target_fs,
         block_info=block_info,
         max_offset_sec=float(max_offset_seconds),
+        video_start_sec=video_motion["window_start_sec"],
+        eeg_start_sec=float(eeg_start_sec),
+        eeg_end_sec=float(eeg_end_sec),
+        wrist_start_relative_sec=wrist_start_relative_sec,
     )
 
     _report_progress(progress_callback, 100, "偏移量计算完成")
@@ -650,6 +742,10 @@ def estimate_video_watch_offset(
         "roi": roi,
         "reference_start_seconds": float(eeg_start_sec),
         "reference_end_seconds": float(eeg_end_sec),
-        "template_start_seconds": float(block_info["template_start"] / target_fs),
-        "template_end_seconds": float(block_info["template_end"] / target_fs),
+        "template_start_seconds": float(video_motion["window_start_sec"] + block_info["template_start"] / target_fs),
+        "template_end_seconds": float(video_motion["window_start_sec"] + block_info["template_end"] / target_fs),
+        "video_window_start_seconds": float(video_motion["window_start_sec"]),
+        "video_window_end_seconds": float(video_motion["window_end_sec"]),
+        "search_start_seconds": float(search_result["search_start_seconds"]),
+        "search_end_seconds": float(search_result["search_end_seconds"]),
     }

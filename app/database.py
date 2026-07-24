@@ -60,6 +60,16 @@ class AppDatabase:
                 hospital_type TEXT,
                 hospital_data_path TEXT,
                 signal_offset_ms INTEGER DEFAULT 0,
+                signal_offset_source TEXT DEFAULT 'manual',
+                signal_offset_confidence REAL DEFAULT 0,
+                signal_offset_reference_start REAL,
+                signal_offset_reference_end REAL,
+                signal_offset_search_start REAL,
+                signal_offset_search_end REAL,
+                signal_offset_template_start REAL,
+                signal_offset_template_end REAL,
+                signal_offset_algorithm_version TEXT,
+                signal_offset_debug_json TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -146,6 +156,16 @@ class AppDatabase:
             "hospital_type": "TEXT",
             "hospital_data_path": "TEXT",
             "signal_offset_ms": "INTEGER DEFAULT 0",
+            "signal_offset_source": "TEXT DEFAULT 'manual'",
+            "signal_offset_confidence": "REAL DEFAULT 0",
+            "signal_offset_reference_start": "REAL",
+            "signal_offset_reference_end": "REAL",
+            "signal_offset_search_start": "REAL",
+            "signal_offset_search_end": "REAL",
+            "signal_offset_template_start": "REAL",
+            "signal_offset_template_end": "REAL",
+            "signal_offset_algorithm_version": "TEXT",
+            "signal_offset_debug_json": "TEXT",
             "created_at": "TEXT",
             "updated_at": "TEXT",
         }
@@ -261,6 +281,10 @@ class AppDatabase:
             "video_start", "video_end", "video_note", "eeg_marker_start", "eeg_marker_end",
             "watch_start", "watch_end", "acc_fs", "gyro_fs", "emg_fs", "ppg_fs",
             "video_path", "watch_path", "hospital_type", "hospital_data_path", "signal_offset_ms",
+            "signal_offset_source", "signal_offset_confidence", "signal_offset_reference_start",
+            "signal_offset_reference_end", "signal_offset_search_start", "signal_offset_search_end",
+            "signal_offset_template_start", "signal_offset_template_end",
+            "signal_offset_algorithm_version", "signal_offset_debug_json",
         }
         values = {key: value for key, value in fields.items() if key in allowed}
         if not values:

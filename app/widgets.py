@@ -10,7 +10,7 @@ class SignalWaveWidget(QWidget):
         self.setAttribute(Qt.WA_OpaquePaintEvent, True)
         self.setAutoFillBackground(False)
         self.setToolTip("按住 Ctrl 并滚动鼠标滚轮可缩放腕表信号时间窗口")
-        self.setMinimumHeight(190)
+        self.setMinimumHeight(220)
         self.duration_ms = 60000
         self.data_duration_ms = 60000
         self.position_ms = 0
@@ -97,7 +97,9 @@ class SignalWaveWidget(QWidget):
         colors = [QColor("#2FA8E1"), QColor("#8E6BE8"), QColor("#34B27A")]
 
         w = self.width()
-        start_y = 28
+        lane_height = max(48, min(66, int((self.height() - 70) / max(len(names), 1))))
+        start_y = 30
+        amplitude = max(18, min(28, lane_height // 2 - 4))
         plot_x1 = 90
         plot_x2 = max(plot_x1 + 1, w - 30)
         visible_start_ms, visible_end_ms = self.visible_data_range()
@@ -107,7 +109,7 @@ class SignalWaveWidget(QWidget):
             painter.drawText(plot_x1, 40, "未选择腕表信号")
 
         for i, name in enumerate(names):
-            y = start_y + i * 45
+            y = start_y + i * lane_height
 
             painter.setPen(QPen(QColor("#24677F"), 2))
             painter.drawText(15, y - 12, name)
@@ -119,9 +121,9 @@ class SignalWaveWidget(QWidget):
             values = display_signals[i][1] if i < len(display_signals) else None
             sample_rate = display_signals[i][2] if i < len(display_signals) and len(display_signals[i]) > 2 else 1.0
             if values is None or len(values) < 2:
-                self.draw_demo_signal(painter, y, plot_x1, plot_x2)
+                self.draw_demo_signal(painter, y, plot_x1, plot_x2, amplitude)
             else:
-                self.draw_raw_signal(painter, values, sample_rate, visible_start_ms, visible_end_ms, y, plot_x1, plot_x2)
+                self.draw_raw_signal(painter, values, sample_rate, visible_start_ms, visible_end_ms, y, plot_x1, plot_x2, amplitude)
 
         self.draw_annotation_ranges(painter, plot_x1, plot_x2, visible_start_ms, visible_end_ms)
         cursor_x = self.cursor_x_in_minute(plot_x1, plot_x2)
@@ -167,7 +169,7 @@ class SignalWaveWidget(QWidget):
             painter.setPen(QPen(QColor("#D99821"), 1))
             painter.drawRect(left_x, top, width, height)
 
-    def draw_demo_signal(self, painter, y, x1, x2):
+    def draw_demo_signal(self, painter, y, x1, x2, amplitude=18):
         """函数说明：执行当前函数对应的业务逻辑。"""
         last_x = x1
         last_y = y
@@ -175,24 +177,24 @@ class SignalWaveWidget(QWidget):
             x = x1 + k * ((x2 - x1) / 35)
             val = 0
             if 4 < k < 10:
-                val = (k % 3 + 1) * 5
+                val = (k % 3 + 1) * max(3, amplitude // 6)
             elif 22 < k < 29:
-                val = (k % 4 + 1) * 4
+                val = (k % 4 + 1) * max(3, amplitude // 7)
             new_y = y - val
             painter.drawLine(int(last_x), int(last_y), int(x), int(new_y))
             last_x, last_y = x, new_y
 
-    def draw_raw_signal(self, painter, values, sample_rate, visible_start_ms, visible_end_ms, y, x1, x2):
+    def draw_raw_signal(self, painter, values, sample_rate, visible_start_ms, visible_end_ms, y, x1, x2, amplitude=18):
         """函数说明：执行当前函数对应的业务逻辑。"""
         if np is None:
-            self.draw_demo_signal(painter, y, x1, x2)
+            self.draw_demo_signal(painter, y, x1, x2, amplitude)
             return
 
         arr = np.asarray(values, dtype=float)
         if arr.ndim == 1:
             arr = arr.reshape(-1, 1)
         if arr.shape[0] < 2:
-            self.draw_demo_signal(painter, y, x1, x2)
+            self.draw_demo_signal(painter, y, x1, x2, amplitude)
             return
 
         start_idx = max(0, int(np.floor(visible_start_ms / 1000 * sample_rate)))
@@ -211,15 +213,6 @@ class SignalWaveWidget(QWidget):
             return
         preview = preview[finite_rows]
         source_idx = source_idx[finite_rows]
-
-        full_values = arr[np.isfinite(arr)]
-        if full_values.size == 0:
-            return
-        global_min = float(np.min(full_values))
-        global_max = float(np.max(full_values))
-        global_span = global_max - global_min
-        if global_span <= 1e-8:
-            global_span = 1.0
 
         visible_span_ms = max(1, visible_end_ms - visible_start_ms)
         x_values = x1 + ((source_idx / sample_rate * 1000 - visible_start_ms) / visible_span_ms) * (x2 - x1)
@@ -243,13 +236,20 @@ class SignalWaveWidget(QWidget):
             if not np.any(channel_finite):
                 continue
             channel_x = x_values[channel_finite]
-            norm = ((channel_values[channel_finite] - global_min) / global_span) * 2.0 - 1.0
+            full_channel = arr[:, channel]
+            full_channel = full_channel[np.isfinite(full_channel)]
+            if full_channel.size == 0:
+                continue
+            channel_min = float(np.min(full_channel))
+            channel_max = float(np.max(full_channel))
+            channel_span = max(channel_max - channel_min, 1e-8)
+            norm = ((channel_values[channel_finite] - channel_min) / channel_span) * 2.0 - 1.0
             norm = np.clip(norm, -1.0, 1.0)
             painter.setPen(QPen(axis_colors[channel], 2))
             last_x = channel_x[0]
-            last_y = y - int(norm[0] * 18)
+            last_y = y - int(norm[0] * amplitude)
             for x, value in zip(channel_x[1:], norm[1:]):
-                new_y = y - int(value * 18)
+                new_y = y - int(value * amplitude)
                 painter.drawLine(int(last_x), int(last_y), int(x), int(new_y))
                 last_x, last_y = x, new_y
 

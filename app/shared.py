@@ -326,14 +326,17 @@ def format_clock_time_value(value, has_date=False):
     return value.strftime("%Y-%m-%d %H:%M:%S" if has_date else "%H:%M:%S")
 
 
-def ms_between_clock_times(start_text, target_text):
+def ms_between_clock_times(start_text, target_text, rollover=True):
     """计算目标时间相对开始时间的毫秒偏移。"""
     start, start_has_date = parse_clock_time_text(start_text)
     target, target_has_date = parse_clock_time_text(target_text)
     if start is None or target is None:
         return None
     if not start_has_date and not target_has_date and target < start:
-        target = target + timedelta(days=1)
+        if rollover:
+            target = target + timedelta(days=1)
+        else:
+            target = target + timedelta(days=1) if (start - target).total_seconds() > 12 * 3600 else target
     return int((target - start).total_seconds() * 1000)
 
 

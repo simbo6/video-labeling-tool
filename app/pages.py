@@ -1,7 +1,13 @@
 ﻿# -*- coding: utf-8 -*-
+import json
+
 from .shared import *
 from .widgets import SignalWaveWidget, EnergyAxisWidget, ModalityFilterDialog, TimelineWidget
-from .offset_estimator import estimate_video_watch_offset, read_video_first_frame
+from .offset_estimator import (
+    OffsetEstimationCancelled,
+    estimate_video_watch_offset,
+    read_video_first_frame,
+)
 from .hospital_time_extractor import extract_hospital_times
 
 
@@ -11,8 +17,9 @@ class OffsetEstimateWorker(QObject):
     finished = pyqtSignal(dict)
     failed = pyqtSignal(str)
     progress = pyqtSignal(int, str)
+    cancelled = pyqtSignal()
 
-    def __init__(self, video_path, watch_path, roi, eeg_start_sec, eeg_end_sec, acc_fs, gyro_fs):
+    def __init__(self, video_path, watch_path, roi, eeg_start_sec, eeg_end_sec, acc_fs, gyro_fs, wrist_start_relative_sec=None):
         super().__init__()
         self.video_path = video_path
         self.watch_path = watch_path
@@ -21,6 +28,12 @@ class OffsetEstimateWorker(QObject):
         self.eeg_end_sec = float(eeg_end_sec)
         self.acc_fs = float(acc_fs)
         self.gyro_fs = float(gyro_fs)
+        self.wrist_start_relative_sec = wrist_start_relative_sec
+        self.cancel_requested = False
+
+    def request_cancel(self):
+        """请求停止当前自动偏移估计。"""
+        self.cancel_requested = True
 
     def run(self):
         """执行自动偏移估计。"""
@@ -38,9 +51,13 @@ class OffsetEstimateWorker(QObject):
                 target_fs=5.0,
                 acc_fs=self.acc_fs,
                 gyro_fs=self.gyro_fs,
+                wrist_start_relative_sec=self.wrist_start_relative_sec,
                 progress_callback=report_progress,
+                cancel_callback=lambda: self.cancel_requested,
             )
             self.finished.emit(result)
+        except OffsetEstimationCancelled:
+            self.cancelled.emit()
         except Exception as exc:
             self.failed.emit(str(exc))
 
@@ -1308,10 +1325,14 @@ class AnnotationPage(QWidget):
         self.annotation_info = None
         self.annotation_type_box = None
         self.auto_offset_btn = None
+        self.cancel_offset_btn = None
+        self.confirm_auto_offset_btn = None
+        self.reject_auto_offset_btn = None
         self.offset_progress_bar = None
         self.offset_status_label = None
         self.offset_thread = None
         self.offset_worker = None
+        self.pending_auto_offset_result = None
         self.annotation_types = self.db.list_annotation_types() if self.db is not None else ["癫痫"]
         project_id = self.app_state.get("project_id")
         self.annotation_records = self.db.list_annotations(project_id) if self.db is not None and project_id else []
@@ -1439,6 +1460,18 @@ class AnnotationPage(QWidget):
         self.auto_offset_btn = make_white_button("自动获取偏移量")
         self.auto_offset_btn.setMinimumHeight(36)
         self.auto_offset_btn.clicked.connect(self.start_auto_offset_estimation)
+        self.cancel_offset_btn = make_white_button("取消计算")
+        self.cancel_offset_btn.setMinimumHeight(36)
+        self.cancel_offset_btn.setVisible(False)
+        self.cancel_offset_btn.clicked.connect(self.cancel_auto_offset_estimation)
+        self.confirm_auto_offset_btn = make_blue_button("确认自动偏移")
+        self.confirm_auto_offset_btn.setMinimumHeight(36)
+        self.confirm_auto_offset_btn.setVisible(False)
+        self.confirm_auto_offset_btn.clicked.connect(self.confirm_auto_offset)
+        self.reject_auto_offset_btn = make_white_button("放弃自动偏移")
+        self.reject_auto_offset_btn.setMinimumHeight(36)
+        self.reject_auto_offset_btn.setVisible(False)
+        self.reject_auto_offset_btn.clicked.connect(self.reject_auto_offset)
         self.offset_progress_bar = QProgressBar()
         self.offset_progress_bar.setRange(0, 100)
         self.offset_progress_bar.setValue(0)
@@ -1506,6 +1539,9 @@ class AnnotationPage(QWidget):
 
         right_layout.addWidget(pre_btn)
         right_layout.addWidget(self.auto_offset_btn)
+        right_layout.addWidget(self.cancel_offset_btn)
+        right_layout.addWidget(self.confirm_auto_offset_btn)
+        right_layout.addWidget(self.reject_auto_offset_btn)
         right_layout.addWidget(self.offset_progress_bar)
         right_layout.addWidget(self.offset_status_label)
         right_layout.addLayout(type_row)
@@ -1523,7 +1559,7 @@ class AnnotationPage(QWidget):
         media_splitter.setSizes([820, 260])
 
         signal_card = make_card()
-        signal_card.setMinimumHeight(240)
+        signal_card.setMinimumHeight(280)
         signal_layout = QVBoxLayout(signal_card)
         signal_layout.setContentsMargins(14, 10, 14, 12)
         signal_layout.setSpacing(6)
@@ -1558,7 +1594,7 @@ class AnnotationPage(QWidget):
         main_splitter.addWidget(signal_card)
         main_splitter.setStretchFactor(0, 3)
         main_splitter.setStretchFactor(1, 2)
-        main_splitter.setSizes([420, 300])
+        main_splitter.setSizes([400, 340])
 
         root.addLayout(top)
         root.addWidget(main_splitter, 1)
@@ -2069,9 +2105,26 @@ class AnnotationPage(QWidget):
 
         acc_fs = float(project.get("acc_fs") or 100.0)
         gyro_fs = float(project.get("gyro_fs") or 100.0)
+        wrist_start_relative_sec = None
+        video_start_text = str(project.get("video_start") or "").strip()
+        watch_start_text = str(project.get("watch_start") or "").strip()
+        if video_start_text and watch_start_text:
+            watch_offset_ms = ms_between_clock_times(
+                video_start_text,
+                watch_start_text,
+                rollover=False,
+            )
+            if watch_offset_ms is not None:
+                wrist_start_relative_sec = watch_offset_ms / 1000.0
 
         self.auto_offset_btn.setEnabled(False)
         self.auto_offset_btn.setText("计算偏移中...")
+        self.cancel_offset_btn.setVisible(True)
+        self.cancel_offset_btn.setEnabled(True)
+        self.confirm_auto_offset_btn.setVisible(False)
+        self.confirm_auto_offset_btn.setEnabled(True)
+        self.reject_auto_offset_btn.setVisible(False)
+        self.pending_auto_offset_result = None
         self.update_auto_offset_progress(0, "已确认 ROI，准备开始计算...")
         self.offset_thread = QThread(self)
         self.offset_worker = OffsetEstimateWorker(
@@ -2082,14 +2135,17 @@ class AnnotationPage(QWidget):
             eeg_end_sec,
             acc_fs,
             gyro_fs,
+            wrist_start_relative_sec=wrist_start_relative_sec,
         )
         self.offset_worker.moveToThread(self.offset_thread)
         self.offset_thread.started.connect(self.offset_worker.run)
         self.offset_worker.progress.connect(self.update_auto_offset_progress)
         self.offset_worker.finished.connect(self.apply_auto_offset_result)
         self.offset_worker.failed.connect(self.handle_auto_offset_error)
+        self.offset_worker.cancelled.connect(self.handle_auto_offset_cancelled)
         self.offset_worker.finished.connect(self.offset_thread.quit)
         self.offset_worker.failed.connect(self.offset_thread.quit)
+        self.offset_worker.cancelled.connect(self.offset_thread.quit)
         self.offset_thread.finished.connect(self.cleanup_auto_offset_worker)
         self.offset_thread.start()
 
@@ -2104,6 +2160,20 @@ class AnnotationPage(QWidget):
         if self.auto_offset_btn is not None:
             self.auto_offset_btn.setEnabled(True)
             self.auto_offset_btn.setText("自动获取偏移量")
+        if self.cancel_offset_btn is not None:
+            self.cancel_offset_btn.setVisible(False)
+            self.cancel_offset_btn.setEnabled(True)
+
+    def cancel_auto_offset_estimation(self):
+        """请求取消后台自动偏移估计。"""
+        if self.offset_worker is not None:
+            self.cancel_offset_btn.setEnabled(False)
+            self.update_auto_offset_progress(0, "正在取消自动偏移计算...")
+            self.offset_worker.request_cancel()
+
+    def handle_auto_offset_cancelled(self):
+        """处理用户主动取消自动偏移估计。"""
+        self.update_auto_offset_progress(0, "自动偏移计算已取消")
 
     def handle_auto_offset_error(self, message):
         """显示自动偏移计算失败信息。"""
@@ -2111,30 +2181,53 @@ class AnnotationPage(QWidget):
         QMessageBox.warning(self, "自动偏移失败", message)
 
     def apply_auto_offset_result(self, result):
-        """应用自动偏移结果，并同步到项目资料。"""
+        """预览自动偏移结果，等待用户确认后再写入项目。"""
         offset_ms = int(result.get("offset_ms", 0))
+        self.pending_auto_offset_result = dict(result)
         if self.wave is not None:
             self.wave.set_signal_offset(offset_ms)
-        else:
-            self.app_state["signal_offset_ms"] = offset_ms
-        if self.db is not None and self.app_state.get("project_id"):
-            project = self.db.update_project(
-                self.app_state["project_id"],
-                signal_offset_ms=offset_ms,
-            )
-            self.app_state["project"] = project
-            self.app_state["signal_offset_ms"] = int(project.get("signal_offset_ms") or 0)
-        self.last_saved_signal_offset_ms = offset_ms
         self.update_offset_label()
         self.sync_annotation_overlay()
-        self.update_auto_offset_progress(100, "自动偏移完成，已同步到当前项目")
+        self.confirm_auto_offset_btn.setVisible(True)
+        self.reject_auto_offset_btn.setVisible(True)
         confidence = float(result.get("confidence", 0.0))
         offset_s = offset_ms / 1000
-        QMessageBox.information(
-            self,
-            "自动偏移完成",
-            f"已更新偏移量：{offset_s:.2f}s\n置信度：{confidence:.3f}"
+        if confidence >= 0.75:
+            level = "置信度较高，建议确认后使用"
+            self.confirm_auto_offset_btn.setEnabled(True)
+        elif confidence >= 0.50:
+            level = "置信度一般，建议先人工复核"
+            self.confirm_auto_offset_btn.setEnabled(True)
+        else:
+            level = "置信度较低，不建议直接使用"
+            self.confirm_auto_offset_btn.setEnabled(False)
+        self.update_auto_offset_progress(100, f"自动偏移已完成：{offset_s:.2f}s，{level}")
+
+    def confirm_auto_offset(self):
+        """确认当前自动偏移预览，并保存质量信息。"""
+        if self.pending_auto_offset_result is None or self.wave is None:
+            return
+        result = dict(self.pending_auto_offset_result)
+        self.save_signal_offset(
+            int(self.wave.get_signal_offset()),
+            source="auto_confirmed",
+            result=result,
         )
+        self.pending_auto_offset_result = None
+        self.confirm_auto_offset_btn.setVisible(False)
+        self.confirm_auto_offset_btn.setEnabled(True)
+        self.reject_auto_offset_btn.setVisible(False)
+        self.update_auto_offset_progress(100, "自动偏移已确认并保存")
+
+    def reject_auto_offset(self):
+        """放弃当前自动偏移预览，恢复确认前的项目偏移。"""
+        self.pending_auto_offset_result = None
+        saved_offset = int(self.app_state.get("signal_offset_ms", 0) or 0)
+        if self.wave is not None:
+            self.wave.set_signal_offset(saved_offset)
+        self.confirm_auto_offset_btn.setVisible(False)
+        self.reject_auto_offset_btn.setVisible(False)
+        self.update_auto_offset_progress(0, "已放弃自动偏移结果")
 
     def refresh_filtered_signals(self):
         """函数说明：执行当前函数对应的业务逻辑。"""
@@ -2344,6 +2437,8 @@ class AnnotationPage(QWidget):
             self.align_mode = False
         self.wave.set_align_mode(self.align_mode)
         self.wave.set_offset_locked(self.offset_locked)
+        if self.offset_locked and self.wave is not None:
+            self.save_signal_offset(int(self.wave.get_signal_offset()), source="manual")
         self.update_offset_label()
 
     def update_signal_visibility(self):
@@ -2456,24 +2551,34 @@ class AnnotationPage(QWidget):
         if self.offset_label is None or self.wave is None:
             return
         offset_s = self.wave.get_signal_offset() / 1000
-        self.offset_label.setText(f"偏移 {offset_s:.1f}s")
-        current_offset_ms = int(self.wave.get_signal_offset())
-        if (
-            self.db is not None
-            and self.app_state.get("project_id")
-            and self.last_saved_signal_offset_ms != current_offset_ms
-        ):
-            project = self.db.update_project(
-                self.app_state["project_id"],
-                signal_offset_ms=current_offset_ms
-            )
-            self.app_state["project"] = project
-            self.app_state["signal_offset_ms"] = int(project.get("signal_offset_ms") or 0)
-            self.last_saved_signal_offset_ms = current_offset_ms
+        self.offset_label.setText(f"腕表相对视频偏移 {offset_s:+.1f}s")
         if self.energy_axis is not None:
             self.energy_axis.set_signal_offset(self.wave.get_signal_offset())
         self.update_timeline_cursor()
         self.sync_annotation_overlay()
+
+    def save_signal_offset(self, offset_ms, source="manual", result=None):
+        """保存偏移量及其来源、置信度和调试窗口信息。"""
+        if self.db is None or not self.app_state.get("project_id"):
+            return
+        result = result or {}
+        project = self.db.update_project(
+            self.app_state["project_id"],
+            signal_offset_ms=int(offset_ms),
+            signal_offset_source=str(source or "manual"),
+            signal_offset_confidence=float(result.get("confidence", 0.0) or 0.0),
+            signal_offset_reference_start=float(result.get("reference_start_seconds", 0.0) or 0.0),
+            signal_offset_reference_end=float(result.get("reference_end_seconds", 0.0) or 0.0),
+            signal_offset_search_start=float(result.get("search_start_seconds", 0.0) or 0.0),
+            signal_offset_search_end=float(result.get("search_end_seconds", 0.0) or 0.0),
+            signal_offset_template_start=float(result.get("template_start_seconds", 0.0) or 0.0),
+            signal_offset_template_end=float(result.get("template_end_seconds", 0.0) or 0.0),
+            signal_offset_algorithm_version="local-window-v1" if result else "manual",
+            signal_offset_debug_json=json.dumps(result, ensure_ascii=False, sort_keys=True),
+        )
+        self.app_state["project"] = project
+        self.app_state["signal_offset_ms"] = int(project.get("signal_offset_ms") or 0)
+        self.last_saved_signal_offset_ms = int(offset_ms)
 
     def format_ms(self, value):
         """函数说明：执行当前函数对应的业务逻辑。"""

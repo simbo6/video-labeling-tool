@@ -1342,6 +1342,8 @@ class AnnotationPage(QWidget):
         self.offset_locked = True
         self.duration_ms = 60000
         self.last_wave_update_ms = -1000
+        self.last_ui_update_ms = -1000
+        self.last_displayed_offset_ms = None
         self.play_timer = QTimer(self)
         self.play_timer.setInterval(30)
         self.play_timer.timeout.connect(self.advance_open_cv_frame)
@@ -1919,7 +1921,7 @@ class AnnotationPage(QWidget):
         self.video_fps = self.video_cap.get(cv2.CAP_PROP_FPS) or 25.0
         self.video_frame_count = int(self.video_cap.get(cv2.CAP_PROP_FRAME_COUNT))
         self.current_frame_idx = -1
-        self.play_timer.setInterval(30)
+        self.play_timer.setInterval(max(10, int(round(1000.0 / max(self.video_fps, 1.0)))))
         if self.video_fps > 0 and self.video_frame_count > 0:
             self.set_duration(max(1, int(self.video_frame_count / self.video_fps * 1000)))
         else:
@@ -2497,18 +2499,28 @@ class AnnotationPage(QWidget):
 
     def render_frame(self, frame):
         """函数说明：执行当前函数对应的业务逻辑。"""
+        target_size = self.video_area.contentsRect().size()
+        target_width = target_size.width()
+        target_height = target_size.height()
+        if target_width <= 0 or target_height <= 0:
+            target_width, target_height = 480, 260
+
+        frame_height, frame_width = frame.shape[:2]
+        scale = min(target_width / max(1, frame_width), target_height / max(1, frame_height))
+        if scale < 1.0:
+            resized_width = max(1, int(round(frame_width * scale)))
+            resized_height = max(1, int(round(frame_height * scale)))
+            frame = cv2.resize(frame, (resized_width, resized_height), interpolation=cv2.INTER_AREA)
+
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         h, w, channels = rgb.shape
         bytes_per_line = channels * w
         image = QImage(rgb.data, w, h, bytes_per_line, QImage.Format_RGB888).copy()
         pixmap = QPixmap.fromImage(image)
-        target_size = self.video_area.contentsRect().size()
-        if target_size.width() <= 0 or target_size.height() <= 0:
-            target_size = QSize(480, 260)
-        scaled = pixmap.scaled(
-            target_size,
+        scaled = pixmap if scale < 1.0 else pixmap.scaled(
+            QSize(target_width, target_height),
             Qt.KeepAspectRatio,
-            Qt.FastTransformation
+            Qt.FastTransformation,
         )
         self.video_area.setPixmap(scaled)
 
@@ -2523,17 +2535,18 @@ class AnnotationPage(QWidget):
     def update_sync_position(self, position_ms, force_wave=False):
         """函数说明：执行当前函数对应的业务逻辑。"""
         position_ms = max(0, min(int(position_ms), self.duration_ms))
-        self.position_slider.blockSignals(True)
-        self.position_slider.setValue(position_ms)
-        self.position_slider.blockSignals(False)
         self.update_timeline_cursor(position_ms)
-        if force_wave or abs(position_ms - self.last_wave_update_ms) >= 500:
+        if force_wave or abs(position_ms - self.last_wave_update_ms) >= 100:
             self.wave.set_position(position_ms)
             if self.energy_axis is not None:
                 self.energy_axis.set_position(position_ms)
             self.last_wave_update_ms = position_ms
-        self.update_offset_label()
-        self.time_text.setText(f"{format_relative_ms(position_ms)} / {format_relative_ms(self.duration_ms)}")
+        if force_wave or abs(position_ms - self.last_ui_update_ms) >= 100:
+            self.position_slider.blockSignals(True)
+            self.position_slider.setValue(position_ms)
+            self.position_slider.blockSignals(False)
+            self.time_text.setText(f"{format_relative_ms(position_ms)} / {format_relative_ms(self.duration_ms)}")
+            self.last_ui_update_ms = position_ms
 
     def update_timeline_cursor(self, position_ms=None):
         """让整体时间轴光标跟随视频和腕表的对齐位置。"""
@@ -2550,12 +2563,15 @@ class AnnotationPage(QWidget):
         """函数说明：执行当前函数对应的业务逻辑。"""
         if self.offset_label is None or self.wave is None:
             return
-        offset_s = self.wave.get_signal_offset() / 1000
+        current_offset_ms = int(self.wave.get_signal_offset())
+        if current_offset_ms == self.last_displayed_offset_ms:
+            return
+        offset_s = current_offset_ms / 1000
         self.offset_label.setText(f"腕表相对视频偏移 {offset_s:+.1f}s")
         if self.energy_axis is not None:
-            self.energy_axis.set_signal_offset(self.wave.get_signal_offset())
+            self.energy_axis.set_signal_offset(current_offset_ms)
+        self.last_displayed_offset_ms = current_offset_ms
         self.update_timeline_cursor()
-        self.sync_annotation_overlay()
 
     def save_signal_offset(self, offset_ms, source="manual", result=None):
         """保存偏移量及其来源、置信度和调试窗口信息。"""

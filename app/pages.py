@@ -1,5 +1,6 @@
 ﻿# -*- coding: utf-8 -*-
 import json
+import time
 
 from .shared import *
 from .widgets import SignalWaveWidget, EnergyAxisWidget, ModalityFilterDialog, TimelineWidget
@@ -60,6 +61,82 @@ class OffsetEstimateWorker(QObject):
             self.cancelled.emit()
         except Exception as exc:
             self.failed.emit(str(exc))
+
+
+class VideoDecodeWorker(QObject):
+    """在后台线程顺序解码视频，避免阻塞 Qt 主线程。"""
+
+    frame_ready = pyqtSignal(object, int)
+    failed = pyqtSignal(str)
+    finished = pyqtSignal()
+
+    def __init__(self, video_path, start_frame, fps, frame_count, target_size):
+        super().__init__()
+        self.video_path = str(video_path)
+        self.start_frame = max(0, int(start_frame))
+        self.fps = max(1.0, float(fps))
+        self.frame_count = max(0, int(frame_count))
+        self.target_width = max(1, int(target_size[0]))
+        self.target_height = max(1, int(target_size[1]))
+        self.stop_requested = False
+
+    def request_stop(self):
+        """请求后台解码循环尽快退出。"""
+        self.stop_requested = True
+
+    def frame_to_image(self, frame):
+        """把视频帧缩放并转换为可跨线程传递的 QImage。"""
+        frame_height, frame_width = frame.shape[:2]
+        scale = min(
+            self.target_width / max(1, frame_width),
+            self.target_height / max(1, frame_height),
+        )
+        if abs(scale - 1.0) > 0.01:
+            resized_width = max(1, int(round(frame_width * scale)))
+            resized_height = max(1, int(round(frame_height * scale)))
+            interpolation = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR
+            frame = cv2.resize(frame, (resized_width, resized_height), interpolation=interpolation)
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        height, width, channels = rgb.shape
+        bytes_per_line = channels * width
+        return QImage(rgb.data, width, height, bytes_per_line, QImage.Format_RGB888).copy()
+
+    def run(self):
+        """顺序读取并按视频帧率向界面发送图像。"""
+        cap = cv2.VideoCapture(self.video_path)
+        if not cap.isOpened():
+            self.failed.emit(f"无法打开视频文件：{self.video_path}")
+            self.finished.emit()
+            return
+        try:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, self.start_frame)
+            frame_idx = self.start_frame - 1
+            frame_interval = 1.0 / self.fps
+            next_deadline = time.monotonic()
+            while not self.stop_requested and frame_idx + 1 < self.frame_count:
+                ok, frame = cap.read()
+                if not ok:
+                    break
+                frame_idx += 1
+                self.frame_ready.emit(self.frame_to_image(frame), frame_idx)
+
+                next_deadline += frame_interval
+                delay = next_deadline - time.monotonic()
+                if delay > 0:
+                    QThread.msleep(max(1, int(delay * 1000)))
+                elif delay < -frame_interval:
+                    skip_count = min(5, int((-delay) / frame_interval))
+                    for _ in range(skip_count):
+                        if self.stop_requested or frame_idx + 1 >= self.frame_count or not cap.grab():
+                            break
+                        frame_idx += 1
+                    next_deadline = time.monotonic()
+        except Exception as exc:
+            if not self.stop_requested:
+                self.failed.emit(str(exc))
+        finally:
+            cap.release()
+            self.finished.emit()
 
 
 class HospitalTimeWorker(QObject):
@@ -1291,12 +1368,16 @@ class AnnotationPage(QWidget):
         self.video_widget = None
         self.video_area = None
         self.video_cap = None
+        self.video_decode_thread = None
+        self.video_decode_worker = None
         self.video_fps = 25.0
         self.video_frame_count = 0
         self.current_frame_idx = -1
         self.video_path = ""
         self.playback_clock = QElapsedTimer()
         self.playback_start_ms = 0
+        self.playback_position_ms = 0
+        self.video_playing = False
         self.timeline = None
         self.wave = None
         self.energy_axis = None
@@ -2407,16 +2488,24 @@ class AnnotationPage(QWidget):
             else:
                 QMessageBox.information(self, "提示", "当前已固定偏移，请先取消固定再拖拽对齐")
                 return
-        self.playback_start_ms = self.position_slider.value()
+        if self.video_decode_thread is not None and self.video_decode_thread.isRunning():
+            return
+        self.playback_start_ms = self.playback_position_ms or self.position_slider.value()
         self.playback_clock.restart()
-        self.play_timer.start()
+        self.video_playing = True
+        self.start_video_decoder(self.playback_start_ms)
+        if self.video_decode_thread is None:
+            self.play_timer.start()
 
     def pause(self):
         """函数说明：执行当前函数对应的业务逻辑。"""
         self.play_timer.stop()
+        self.video_playing = False
+        self.stop_video_decoder(wait=True)
 
     def seek(self, position_ms):
         """函数说明：执行当前函数对应的业务逻辑。"""
+        self.pause()
         self.show_frame_at(position_ms)
         self.update_sync_position(position_ms, force_wave=True)
 
@@ -2464,8 +2553,71 @@ class AnnotationPage(QWidget):
         if position_ms >= self.duration_ms:
             position_ms = self.duration_ms
             self.play_timer.stop()
-        self.show_frame_at(position_ms, prefer_sequential=True)
+            self.stop_video_decoder(wait=False)
+        if self.video_decode_thread is None:
+            self.show_frame_at(position_ms, prefer_sequential=True)
         self.update_sync_position(position_ms)
+        self.playback_position_ms = position_ms
+
+    def start_video_decoder(self, position_ms):
+        """启动后台视频解码线程，界面线程只负责接收和显示图像。"""
+        if self.video_decode_thread is not None:
+            return
+        target_size = self.video_area.contentsRect().size()
+        target_width = target_size.width() if target_size.width() > 0 else 480
+        target_height = target_size.height() if target_size.height() > 0 else 260
+        start_frame = int(max(0, position_ms) / 1000.0 * self.video_fps)
+        self.video_decode_thread = QThread(self)
+        self.video_decode_worker = VideoDecodeWorker(
+            self.loaded_video_path or self.video_path,
+            start_frame,
+            self.video_fps,
+            self.video_frame_count,
+            (target_width, target_height),
+        )
+        self.video_decode_worker.moveToThread(self.video_decode_thread)
+        self.video_decode_thread.started.connect(self.video_decode_worker.run)
+        self.video_decode_worker.frame_ready.connect(self.display_decoded_frame)
+        self.video_decode_worker.failed.connect(self.handle_video_decode_error)
+        self.video_decode_worker.finished.connect(self.video_decode_worker.deleteLater)
+        self.video_decode_worker.finished.connect(self.video_decode_thread.quit, Qt.DirectConnection)
+        self.video_decode_thread.finished.connect(self.cleanup_video_decoder)
+        self.video_decode_thread.start()
+
+    def stop_video_decoder(self, wait=False):
+        """请求后台解码线程停止。"""
+        worker = self.video_decode_worker
+        thread = self.video_decode_thread
+        if worker is None or thread is None:
+            return
+        worker.request_stop()
+        if wait and thread.isRunning():
+            thread.wait(500)
+
+    def cleanup_video_decoder(self):
+        """释放后台视频解码线程和 worker。"""
+        if self.video_decode_thread is not None:
+            self.video_decode_thread.deleteLater()
+        self.video_decode_worker = None
+        self.video_decode_thread = None
+        self.video_playing = False
+
+    def display_decoded_frame(self, image, frame_idx):
+        """在主线程显示后台解码完成的图像。"""
+        if image is None:
+            return
+        if not self.video_playing:
+            return
+        self.current_frame_idx = int(frame_idx)
+        self.video_area.setPixmap(QPixmap.fromImage(image))
+        position_ms = int(self.current_frame_idx / max(self.video_fps, 1.0) * 1000)
+        self.update_sync_position(position_ms)
+
+    def handle_video_decode_error(self, message):
+        """显示后台视频解码错误。"""
+        self.play_timer.stop()
+        self.video_playing = False
+        QMessageBox.warning(self, "视频播放失败", str(message))
 
     def show_frame_at(self, position_ms, prefer_sequential=False):
         """函数说明：执行当前函数对应的业务逻辑。"""
@@ -2527,6 +2679,8 @@ class AnnotationPage(QWidget):
     def close_video_capture(self):
         """函数说明：执行当前函数对应的业务逻辑。"""
         self.play_timer.stop()
+        self.video_playing = False
+        self.stop_video_decoder(wait=True)
         if self.video_cap is not None:
             self.video_cap.release()
         self.video_cap = None
@@ -2535,6 +2689,7 @@ class AnnotationPage(QWidget):
     def update_sync_position(self, position_ms, force_wave=False):
         """函数说明：执行当前函数对应的业务逻辑。"""
         position_ms = max(0, min(int(position_ms), self.duration_ms))
+        self.playback_position_ms = position_ms
         self.update_timeline_cursor(position_ms)
         if force_wave or abs(position_ms - self.last_wave_update_ms) >= 100:
             self.wave.set_position(position_ms)

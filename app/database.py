@@ -57,6 +57,8 @@ class AppDatabase:
                 ppg_fs REAL DEFAULT 25,
                 video_path TEXT,
                 watch_path TEXT,
+                hospital_type TEXT,
+                hospital_data_path TEXT,
                 signal_offset_ms INTEGER DEFAULT 0,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
@@ -141,6 +143,8 @@ class AppDatabase:
             "ppg_fs": "REAL DEFAULT 25",
             "video_path": "TEXT",
             "watch_path": "TEXT",
+            "hospital_type": "TEXT",
+            "hospital_data_path": "TEXT",
             "signal_offset_ms": "INTEGER DEFAULT 0",
             "created_at": "TEXT",
             "updated_at": "TEXT",
@@ -256,7 +260,7 @@ class AppDatabase:
             "dominant_hand", "birth_date", "seizure_date", "wearing_hand",
             "video_start", "video_end", "video_note", "eeg_marker_start", "eeg_marker_end",
             "watch_start", "watch_end", "acc_fs", "gyro_fs", "emg_fs", "ppg_fs",
-            "video_path", "watch_path", "signal_offset_ms",
+            "video_path", "watch_path", "hospital_type", "hospital_data_path", "signal_offset_ms",
         }
         values = {key: value for key, value in fields.items() if key in allowed}
         if not values:

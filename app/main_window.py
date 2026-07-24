@@ -59,8 +59,6 @@ class MainWindow(QMainWindow):
         """把指定项目设为当前项目，并打开该项目的标注页。"""
         self.db.set_current_project(project_id)
         self.load_current_project_state()
-        self.import_page.restore_import_paths()
-        self.annotation_page.refresh_loaded_data()
         self.show_annotation_page()
 
     def open_project_for_import(self, project_id):
@@ -98,8 +96,8 @@ class MainWindow(QMainWindow):
 
     def show_annotation_page(self):
         """显示当前项目的标注工作页。"""
-        self.annotation_page.refresh_loaded_data()
         self.stack.setCurrentIndex(5)
+        QTimer.singleShot(0, self.annotation_page.refresh_loaded_data)
 
     def closeEvent(self, event):
         """关闭窗口时释放数据库连接。"""

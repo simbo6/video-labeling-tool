@@ -1,0 +1,59 @@
+{"kind":"deck","id":"pr/jlgckx","name":"Deck"}
+{"kind":"layout","layoutId":"c7509cc0-50d8-4d4c-bd84-3cede0be6443","name":"Master","type":"master"}
+{"kind":"layout","layoutId":"1f2af5eb-ceb6-4b15-b383-46c65bf47bda","name":"Title Slide","type":"title"}
+{"kind":"slide","id":"sl/0o2i6l","slide":1,"title":"系统总体功能模块设计图","textShapes":28}
+{"kind":"shape","id":"sh/cj6tovah","slide":1,"name":"diagram-boundary","bbox":[40,60,1200,600]}
+{"kind":"textbox","id":"sh/nyd0z610","slide":1,"name":"title","text":"系统总体功能模块设计图","textPreview":"系统总体功能模块设计图","textChars":11,"textLines":1,"bbox":[320,16,640,32]}
+{"kind":"textbox","id":"sh/udg7adsj","slide":1,"name":"root-system","text":"癫痫腕表数据标注平台","textPreview":"癫痫腕表数据标注平台","textChars":10,"textLines":1,"bbox":[470,88,340,58]}
+{"kind":"textbox","id":"sh/5gbq1ory","slide":1,"name":"module-1","text":"用户与项目\n管理模块","textPreview":"用户与项目 | 管理模块","textChars":10,"textLines":2,"bbox":[55,185,190,64]}
+{"kind":"shape","id":"sh/cvixczed","slide":1,"bbox":[150,146,490,39]}
+{"kind":"textbox","id":"sh/nap4r65w","slide":1,"name":"module-1-item-1","text":"用户注册/登录","textPreview":"用户注册/登录","textChars":7,"textLines":1,"bbox":[62,286,176,46]}
+{"kind":"shape","id":"sh/upwb2hwf","slide":1,"bbox":[150,249,0,37]}
+{"kind":"textbox","id":"sh/1orytsvu","slide":1,"name":"module-1-item-2","text":"创建项目","textPreview":"创建项目","textChars":4,"textLines":1,"bbox":[62,368,176,46]}
+{"kind":"shape","id":"sh/c7u54zid","slide":1,"bbox":[150,249,0,119]}
+{"kind":"textbox","id":"sh/6xkf6dcb","slide":1,"name":"module-1-item-3","text":"编辑/删除项目","textPreview":"编辑/删除项目","textChars":7,"textLines":1,"bbox":[62,450,176,46]}
+{"kind":"shape","id":"sh/zed8v6ps","slide":1,"bbox":[150,249,0,201]}
+{"kind":"textbox","id":"sh/oza1gvy9","slide":1,"name":"module-1-item-4","text":"项目查看","textPreview":"项目查看","textChars":4,"textLines":1,"bbox":[62,532,176,46]}
+{"kind":"shape","id":"sh/hk3q5o7q","slide":1,"bbox":[150,249,0,283]}
+{"kind":"textbox","id":"sh/65wjudg7","slide":1,"name":"module-2","text":"资料导入与\n时间提取模块","textPreview":"资料导入与 | 时间提取模块","textChars":12,"textLines":2,"bbox":[290,185,190,64]}
+{"kind":"shape","id":"sh/zqtcj6to","slide":1,"bbox":[385,146,255,39]}
+{"kind":"textbox","id":"sh/obm58z25","slide":1,"name":"module-2-item-1","text":"录入患者基本信息","textPreview":"录入患者基本信息","textChars":8,"textLines":1,"bbox":[297,286,176,46]}
+{"kind":"shape","id":"sh/hwfyxobm","slide":1,"bbox":[385,249,0,37]}
+{"kind":"textbox","id":"sh/a9w3m94f","slide":1,"name":"module-2-item-2","text":"导入视频/腕表数据","textPreview":"导入视频/腕表数据","textChars":9,"textLines":1,"bbox":[297,368,176,46]}
+{"kind":"shape","id":"sh/zupwb2hw","slide":1,"bbox":[385,249,0,119]}
+{"kind":"textbox","id":"sh/b6xkf6dc","slide":1,"name":"module-2-item-3","text":"采样率设置与保存","textPreview":"采样率设置与保存","textChars":8,"textLines":1,"bbox":[297,450,176,46]}
+{"kind":"shape","id":"sh/il0rqd4v","slide":1,"bbox":[385,249,0,201]}
+{"kind":"textbox","id":"sh/tcj6tova","slide":1,"name":"module-2-item-4","text":"提取时间并回写项目","textPreview":"提取时间并回写项目","textChars":9,"textLines":1,"bbox":[297,532,176,46]}
+{"kind":"shape","id":"sh/0rqd4vmt","slide":1,"bbox":[385,249,0,283]}
+{"kind":"textbox","id":"sh/byhgn29g","slide":1,"name":"module-3","text":"对齐与信号\n浏览模块","textPreview":"对齐与信号 | 浏览模块","textChars":10,"textLines":2,"bbox":[525,185,190,64]}
+{"kind":"shape","id":"sh/idonyd0z","slide":1,"bbox":[620,146,20,39]}
+{"kind":"textbox","id":"sh/t47y1kre","slide":1,"name":"module-3-item-1","text":"播放/暂停/拖动视频","textPreview":"播放/暂停/拖动视频","textChars":10,"textLines":1,"bbox":[532,286,176,46]}
+{"kind":"shape","id":"sh/0je9cvix","slide":1,"bbox":[620,249,0,37]}
+{"kind":"textbox","id":"sh/bulwval8","slide":1,"name":"module-3-item-2","text":"浏览波形与能量轴","textPreview":"浏览波形与能量轴","textChars":8,"textLines":1,"bbox":[532,368,176,46]}
+{"kind":"shape","id":"sh/i9s36hcr","slide":1,"bbox":[620,249,0,119]}
+{"kind":"textbox","id":"sh/w3m94fu1","slide":1,"name":"module-3-item-3","text":"选择模态并设置滤波","textPreview":"选择模态并设置滤波","textChars":9,"textLines":1,"bbox":[532,450,176,46]}
+{"kind":"shape","id":"sh/loj2t83i","slide":1,"bbox":[620,249,0,201]}
+{"kind":"textbox","id":"sh/ex0nuxc3","slide":1,"name":"module-3-item-4","text":"自动/手动偏移对齐","textPreview":"自动/手动偏移对齐","textChars":9,"textLines":1,"bbox":[532,532,176,46]}
+{"kind":"shape","id":"sh/3itgfmlk","slide":1,"bbox":[620,249,0,283]}
+{"kind":"textbox","id":"sh/wb2hwfyx","slide":1,"name":"module-4","text":"标注作业模块","textPreview":"标注作业模块","textChars":6,"textLines":1,"bbox":[760,185,190,64]}
+{"kind":"shape","id":"sh/lwval87e","slide":1,"bbox":[640,146,215,39]}
+{"kind":"textbox","id":"sh/e9cvixcz","slide":1,"name":"module-4-item-1","text":"标注类型管理","textPreview":"标注类型管理","textChars":6,"textLines":1,"bbox":[767,286,176,46]}
+{"kind":"shape","id":"sh/3q5o7qpg","slide":1,"bbox":[855,249,0,37]}
+{"kind":"textbox","id":"sh/sneloj2t","slide":1,"name":"module-4-item-2","text":"标记开始/结束时间","textPreview":"标记开始/结束时间","textChars":9,"textLines":1,"bbox":[767,368,176,46]}
+{"kind":"shape","id":"sh/l87ed8ba","slide":1,"bbox":[855,249,0,119]}
+{"kind":"textbox","id":"sh/xs72x4na","slide":1,"name":"module-4-item-3","text":"拖拽框选标注区间","textPreview":"拖拽框选标注区间","textChars":8,"textLines":1,"bbox":[767,450,176,46]}
+{"kind":"shape","id":"sh/87ed8bat","slide":1,"bbox":[855,249,0,201]}
+{"kind":"textbox","id":"sh/fmlkjm1c","slide":1,"name":"module-4-item-4","text":"保存/删除标注","textPreview":"保存/删除标注","textChars":7,"textLines":1,"bbox":[767,532,176,46]}
+{"kind":"shape","id":"sh/q1orytsv","slide":1,"bbox":[855,249,0,283]}
+{"kind":"textbox","id":"sh/1gvy90je","slide":1,"name":"module-5","text":"标注记录模块","textPreview":"标注记录模块","textChars":6,"textLines":1,"bbox":[995,185,190,64]}
+{"kind":"shape","id":"sh/8z25kb6x","slide":1,"bbox":[640,146,450,39]}
+{"kind":"textbox","id":"sh/je9cvixc","slide":1,"name":"module-5-item-1","text":"查看项目标注记录","textPreview":"查看项目标注记录","textChars":8,"textLines":1,"bbox":[1002,286,176,46]}
+{"kind":"shape","id":"sh/qtcj6tov","slide":1,"bbox":[1090,249,0,37]}
+{"kind":"textbox","id":"sh/xczed8v6","slide":1,"name":"module-5-item-2","text":"显示起止时间","textPreview":"显示起止时间","textChars":6,"textLines":1,"bbox":[1002,368,176,46]}
+{"kind":"shape","id":"sh/8v6psfil","slide":1,"bbox":[1090,249,0,119]}
+{"kind":"textbox","id":"sh/25kb6xkf","slide":1,"name":"module-5-item-3","text":"显示持续时间","textPreview":"显示持续时间","textChars":6,"textLines":1,"bbox":[1002,450,176,46]}
+{"kind":"shape","id":"sh/rqd4vmtw","slide":1,"bbox":[1090,249,0,201]}
+{"kind":"textbox","id":"sh/kb6xkf6d","slide":1,"name":"module-5-item-4","text":"按项目查询历史标注","textPreview":"按项目查询历史标注","textChars":9,"textLines":1,"bbox":[1002,532,176,46]}
+{"kind":"shape","id":"sh/9w3m94fu","slide":1,"bbox":[1090,249,0,283]}
+{"kind":"textbox","id":"sh/2t83itgf","slide":1,"name":"caption","text":"图 4-1 系统总体功能模块设计图","textPreview":"图 4-1 系统总体功能模块设计图","textChars":17,"textLines":1,"bbox":[360,672,560,24]}
+{"kind":"notes","id":"nt/0o2i6l","slide":1,"text":""}

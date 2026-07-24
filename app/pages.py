@@ -1,6 +1,215 @@
 ﻿# -*- coding: utf-8 -*-
 from .shared import *
 from .widgets import SignalWaveWidget, EnergyAxisWidget, ModalityFilterDialog, TimelineWidget
+from .offset_estimator import estimate_video_watch_offset, read_video_first_frame
+from .hospital_time_extractor import extract_hospital_times
+
+
+class OffsetEstimateWorker(QObject):
+    """在后台线程估计视频和腕表数据偏移量。"""
+
+    finished = pyqtSignal(dict)
+    failed = pyqtSignal(str)
+    progress = pyqtSignal(int, str)
+
+    def __init__(self, video_path, watch_path, roi, eeg_start_sec, eeg_end_sec, acc_fs, gyro_fs):
+        super().__init__()
+        self.video_path = video_path
+        self.watch_path = watch_path
+        self.roi = tuple(roi)
+        self.eeg_start_sec = float(eeg_start_sec)
+        self.eeg_end_sec = float(eeg_end_sec)
+        self.acc_fs = float(acc_fs)
+        self.gyro_fs = float(gyro_fs)
+
+    def run(self):
+        """执行自动偏移估计。"""
+        try:
+            def report_progress(percent, message):
+                self.progress.emit(int(percent), str(message or ""))
+
+            result = estimate_video_watch_offset(
+                self.video_path,
+                self.watch_path,
+                roi=self.roi,
+                eeg_start_sec=self.eeg_start_sec,
+                eeg_end_sec=self.eeg_end_sec,
+                imu_mode="acc_gyr",
+                target_fs=5.0,
+                acc_fs=self.acc_fs,
+                gyro_fs=self.gyro_fs,
+                progress_callback=report_progress,
+            )
+            self.finished.emit(result)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class HospitalTimeWorker(QObject):
+    """在后台线程读取医院导出目录中的时间信息。"""
+
+    finished = pyqtSignal(dict)
+    failed = pyqtSignal(str)
+
+    def __init__(self, folder_path, hospital_type):
+        super().__init__()
+        self.folder_path = folder_path
+        self.hospital_type = hospital_type
+
+    def run(self):
+        """执行医院时间信息提取。"""
+        try:
+            self.finished.emit(extract_hospital_times(self.folder_path, self.hospital_type))
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class RoiSelectionLabel(QLabel):
+    """用于在第一帧上手动框选 ROI。"""
+
+    selectionChanged = pyqtSignal()
+
+    def __init__(self, pixmap, original_size, parent=None):
+        super().__init__(parent)
+        self.setPixmap(pixmap)
+        self.setFixedSize(pixmap.size())
+        self.original_width = int(original_size[0])
+        self.original_height = int(original_size[1])
+        self.drag_start = None
+        self.drag_end = None
+        self.setCursor(Qt.CrossCursor)
+
+    def mousePressEvent(self, event):
+        if event.button() != Qt.LeftButton:
+            return
+        point = self._clamp_point(event.pos())
+        self.drag_start = point
+        self.drag_end = point
+        self.update()
+        self.selectionChanged.emit()
+
+    def mouseMoveEvent(self, event):
+        if self.drag_start is None:
+            return
+        self.drag_end = self._clamp_point(event.pos())
+        self.update()
+        self.selectionChanged.emit()
+
+    def mouseReleaseEvent(self, event):
+        if self.drag_start is None:
+            return
+        self.drag_end = self._clamp_point(event.pos())
+        self.update()
+        self.selectionChanged.emit()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        rect = self.selected_rect()
+        if rect is None:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(QPen(QColor("#FF3B30"), 2))
+        painter.setBrush(QBrush(QColor(255, 59, 48, 40)))
+        painter.drawRect(rect)
+
+    def _clamp_point(self, point):
+        return QPoint(
+            max(0, min(int(point.x()), self.width() - 1)),
+            max(0, min(int(point.y()), self.height() - 1)),
+        )
+
+    def selected_rect(self):
+        if self.drag_start is None or self.drag_end is None:
+            return None
+        rect = QRect(self.drag_start, self.drag_end).normalized()
+        if rect.width() < 4 or rect.height() < 4:
+            return None
+        return rect
+
+    def selected_roi(self):
+        rect = self.selected_rect()
+        if rect is None:
+            return None
+        scale_x = self.original_width / max(1, self.width())
+        scale_y = self.original_height / max(1, self.height())
+        x = max(0, min(int(round(rect.x() * scale_x)), self.original_width - 1))
+        y = max(0, min(int(round(rect.y() * scale_y)), self.original_height - 1))
+        right = max(x + 1, min(int(round((rect.x() + rect.width()) * scale_x)), self.original_width))
+        bottom = max(y + 1, min(int(round((rect.y() + rect.height()) * scale_y)), self.original_height))
+        return x, y, max(1, right - x), max(1, bottom - y)
+
+
+class RoiSelectionDialog(QDialog):
+    """弹出第一帧预览，让用户手动框选 ROI。"""
+
+    def __init__(self, frame_bgr, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("选择 ROI")
+        self.selected_roi_value = None
+
+        height, width = frame_bgr.shape[:2]
+        frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        bytes_per_line = frame_rgb.shape[1] * frame_rgb.shape[2]
+        image = QImage(frame_rgb.data, frame_rgb.shape[1], frame_rgb.shape[0], bytes_per_line, QImage.Format_RGB888).copy()
+        pixmap = QPixmap.fromImage(image)
+
+        max_width = 1100
+        max_height = 700
+        scale = min(max_width / max(1, width), max_height / max(1, height), 1.0)
+        display_width = max(1, int(round(width * scale)))
+        display_height = max(1, int(round(height * scale)))
+        display_pixmap = pixmap.scaled(display_width, display_height, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(12)
+
+        tip = QLabel("请在第一帧上框出病床/病人区域，然后点击“确认 ROI”。")
+        tip.setWordWrap(True)
+        tip.setObjectName("SubTitleLabel")
+
+        self.roi_label = RoiSelectionLabel(display_pixmap, (width, height), self)
+        self.status_label = QLabel("尚未选择 ROI")
+        self.status_label.setObjectName("SubTitleLabel")
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        cancel_btn = make_white_button("取消")
+        self.confirm_btn = make_blue_button("确认 ROI")
+        self.confirm_btn.setEnabled(False)
+        cancel_btn.clicked.connect(self.reject)
+        self.confirm_btn.clicked.connect(self.accept_selection)
+        btn_row.addWidget(cancel_btn)
+        btn_row.addWidget(self.confirm_btn)
+
+        self.roi_label.selectionChanged.connect(self.refresh_status)
+
+        layout.addWidget(tip)
+        layout.addWidget(self.roi_label, alignment=Qt.AlignCenter)
+        layout.addWidget(self.status_label)
+        layout.addLayout(btn_row)
+
+    def refresh_status(self):
+        roi = self.roi_label.selected_roi()
+        if roi is None:
+            self.status_label.setText("尚未选择 ROI")
+            self.confirm_btn.setEnabled(False)
+            return
+        x, y, w, h = roi
+        self.status_label.setText(f"当前 ROI：x={x}, y={y}, w={w}, h={h}")
+        self.confirm_btn.setEnabled(True)
+
+    def accept_selection(self):
+        roi = self.roi_label.selected_roi()
+        if roi is None:
+            QMessageBox.information(self, "提示", "请先框选一个有效 ROI")
+            return
+        self.selected_roi_value = roi
+        self.accept()
+
+    def selected_roi(self):
+        return self.selected_roi_value
 
 class LoginPage(QWidget):
     def __init__(self, switch_to_main, db=None):
@@ -110,6 +319,7 @@ class ProjectListPage(QWidget):
         self.open_record_project_callback = open_record_project
         self.project_list = None
         self.project_count_label = None
+        self.metric_labels = {}
         self.init_ui()
 
     def init_ui(self):
@@ -128,14 +338,14 @@ class ProjectListPage(QWidget):
         logo = QLabel("数据标注平台")
         logo.setObjectName("LogoLabel")
         logo.setAlignment(Qt.AlignCenter)
+        import_nav_btn = make_white_button("资料导入")
+        anno_btn = make_white_button("标注工作台")
         record_btn = make_white_button("标注记录")
-        anno_btn = make_white_button("进入标注")
-        import_nav_btn = make_white_button("导入数据")
         side_layout.addWidget(logo)
         side_layout.addSpacing(20)
         side_layout.addWidget(import_nav_btn)
-        side_layout.addWidget(record_btn)
         side_layout.addWidget(anno_btn)
+        side_layout.addWidget(record_btn)
         side_layout.addStretch()
 
         main = QWidget()
@@ -147,7 +357,7 @@ class ProjectListPage(QWidget):
         title_group = QVBoxLayout()
         title = QLabel("项目管理")
         title.setObjectName("TitleLabel")
-        subtitle = QLabel("每个项目独立保存患者信息、视频、腕表数据、对齐偏移和标注记录")
+        subtitle = QLabel("按项目管理患者资料、视频、腕表数据、对齐偏移和标注记录")
         subtitle.setObjectName("SubTitleLabel")
         title_group.addWidget(title)
         title_group.addWidget(subtitle)
@@ -157,18 +367,34 @@ class ProjectListPage(QWidget):
         header.addLayout(title_group, 1)
         header.addWidget(self.project_count_label)
 
-        top = QHBoxLayout()
+        metrics = QHBoxLayout()
+        metrics.setSpacing(12)
+        for key, title_text in [
+            ("projects", "项目总数"),
+            ("videos", "已导入视频"),
+            ("watch", "已导入腕表"),
+            ("annotations", "标注记录"),
+        ]:
+            card, value_label = self.make_metric_card(title_text, "0")
+            self.metric_labels[key] = value_label
+            metrics.addWidget(card)
+
+        toolbar_card = QFrame()
+        toolbar_card.setObjectName("ToolbarCard")
+        top = QHBoxLayout(toolbar_card)
+        top.setContentsMargins(14, 12, 14, 12)
+        top.setSpacing(10)
         add_btn = make_blue_button("新建项目")
-        open_btn = make_blue_button("打开项目")
-        import_btn = make_white_button("导入数据")
+        import_btn = make_white_button("编辑/导入资料")
+        open_btn = make_blue_button("开始标注")
         record_btn_top = make_white_button("查看记录")
         delete_btn = make_danger_button("删除项目")
         top.addWidget(add_btn)
-        top.addWidget(open_btn)
         top.addWidget(import_btn)
+        top.addWidget(open_btn)
         top.addWidget(record_btn_top)
-        top.addWidget(delete_btn)
         top.addStretch()
+        top.addWidget(delete_btn)
 
         self.project_list = QTableWidget()
         self.project_list.setColumnCount(8)
@@ -198,11 +424,27 @@ class ProjectListPage(QWidget):
         anno_btn.clicked.connect(self.open_selected_project)
 
         main_layout.addLayout(header)
-        main_layout.addLayout(top)
+        main_layout.addLayout(metrics)
+        main_layout.addWidget(toolbar_card)
         main_layout.addWidget(self.project_list)
         root.addWidget(side)
         root.addWidget(main)
         self.refresh_projects()
+
+    def make_metric_card(self, title, value):
+        """创建首页统计卡片。"""
+        card = QFrame()
+        card.setObjectName("MetricCard")
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(4)
+        value_label = QLabel(value)
+        value_label.setObjectName("MetricValue")
+        title_label = QLabel(title)
+        title_label.setObjectName("MetricLabel")
+        layout.addWidget(value_label)
+        layout.addWidget(title_label)
+        return card, value_label
 
     def refresh_projects(self):
         """函数说明：执行当前函数对应的业务逻辑。"""
@@ -210,14 +452,22 @@ class ProjectListPage(QWidget):
             return
         projects = self.db.list_projects() if self.db is not None else []
         self.project_list.setRowCount(len(projects))
+        total_annotations = 0
+        video_count = 0
+        watch_count = 0
         if self.project_count_label is not None:
             self.project_count_label.setText(f"{len(projects)} 个项目")
         for row, project in enumerate(projects):
             patient = project.get("patient_name") or "未填写患者"
             offset = int(project.get("signal_offset_ms") or 0) / 1000
+            has_video = bool(project.get("video_path"))
+            has_watch = bool(project.get("watch_path"))
+            video_count += 1 if has_video else 0
+            watch_count += 1 if has_watch else 0
             video_name = os.path.basename(project.get("video_path") or "") or "未导入"
             watch_name = os.path.basename(project.get("watch_path") or "") or "未导入"
             annotation_count = len(self.db.list_annotations(project["id"])) if self.db is not None else 0
+            total_annotations += annotation_count
             values = [
                 str(project["id"]),
                 project.get("name") or "未命名项目",
@@ -235,6 +485,11 @@ class ProjectListPage(QWidget):
             self.project_list.setRowHeight(row, 42)
         if projects and self.project_list.currentRow() < 0:
             self.project_list.selectRow(0)
+        if self.metric_labels:
+            self.metric_labels["projects"].setText(str(len(projects)))
+            self.metric_labels["videos"].setText(str(video_count))
+            self.metric_labels["watch"].setText(str(watch_count))
+            self.metric_labels["annotations"].setText(str(total_annotations))
 
     def current_project_id(self):
         """函数说明：执行当前函数对应的业务逻辑。"""
@@ -313,6 +568,11 @@ class ImportPage(QWidget):
         self.db = db
         self.video_path_edit = None
         self.watch_path_edit = None
+        self.hospital_path_edit = None
+        self.hospital_type_box = None
+        self.hospital_summary = None
+        self.hospital_thread = None
+        self.hospital_worker = None
         self.video_summary = None
         self.watch_summary = None
         self.raw_tabs = None
@@ -385,6 +645,39 @@ class ImportPage(QWidget):
             self.project_fields[key] = edit
             video_layout.addWidget(QLabel(name), 1 + i // 3, (i % 3) * 2)
             video_layout.addWidget(edit, 1 + i // 3, (i % 3) * 2 + 1)
+
+        hospital_card = make_card()
+        hospital_layout = QGridLayout(hospital_card)
+        hospital_layout.setContentsMargins(25, 22, 25, 22)
+        hospital_layout.setSpacing(14)
+
+        self.hospital_type_box = QComboBox()
+        self.hospital_type_box.addItems(["自动识别", "天坛医院", "宣武医院"])
+        self.hospital_type_box.setMinimumHeight(34)
+        self.hospital_type_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+        self.hospital_path_edit = QLineEdit()
+        self.hospital_path_edit.setPlaceholderText("请选择天坛医院或宣武医院导出的数据目录")
+        self.hospital_path_edit.setMinimumHeight(34)
+        self.hospital_path_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+        hospital_dir_btn = make_white_button("选择目录")
+        hospital_read_btn = make_blue_button("读取时间信息")
+        hospital_dir_btn.clicked.connect(self.choose_hospital_folder)
+        hospital_read_btn.clicked.connect(self.start_hospital_time_extract)
+
+        self.hospital_summary = QTextEdit()
+        self.hospital_summary.setReadOnly(True)
+        self.hospital_summary.setFixedHeight(86)
+        self.hospital_summary.setPlaceholderText("医院数据目录读取结果将在这里显示")
+
+        hospital_layout.addWidget(QLabel("医院类型"), 0, 0)
+        hospital_layout.addWidget(self.hospital_type_box, 0, 1)
+        hospital_layout.addWidget(QLabel("医院数据目录"), 0, 2)
+        hospital_layout.addWidget(self.hospital_path_edit, 0, 3, 1, 3)
+        hospital_layout.addWidget(hospital_dir_btn, 0, 6)
+        hospital_layout.addWidget(hospital_read_btn, 0, 7)
+        hospital_layout.addWidget(self.hospital_summary, 1, 0, 1, 8)
 
         watch_card = make_card()
         watch_layout = QGridLayout(watch_card)
@@ -460,6 +753,7 @@ class ImportPage(QWidget):
 
         root.addWidget(top_card)
         root.addWidget(video_card)
+        root.addWidget(hospital_card)
         root.addWidget(watch_card)
         root.addWidget(raw_card)
         root.addLayout(bottom)
@@ -482,14 +776,36 @@ class ImportPage(QWidget):
             edit.setText(str(project.get(key) or default_value))
         video_path = self.app_state.get("video_path", "")
         watch_path = self.app_state.get("watch_path", "")
+        hospital_path = project.get("hospital_data_path") or ""
+        hospital_type = project.get("hospital_type") or "自动识别"
         if self.video_path_edit is not None:
             self.video_path_edit.setText(video_path)
         if self.watch_path_edit is not None:
             self.watch_path_edit.setText(watch_path)
+        if self.hospital_path_edit is not None:
+            self.hospital_path_edit.setText(hospital_path)
+        if self.hospital_type_box is not None:
+            index = self.hospital_type_box.findText(hospital_type)
+            self.hospital_type_box.setCurrentIndex(index if index >= 0 else 0)
         if self.video_summary is not None:
             self.video_summary.clear()
         if self.watch_summary is not None:
             self.watch_summary.clear()
+        if self.hospital_summary is not None:
+            if hospital_path:
+                self.hospital_summary.setText(
+                    "\n".join([
+                        f"医院类型：{hospital_type}",
+                        f"数据目录：{hospital_path}",
+                        f"发作日期：{project.get('seizure_date') or '未填写'}",
+                        f"视频开始：{project.get('video_start') or '未填写'}",
+                        f"视频结束：{project.get('video_end') or '未填写'}",
+                        f"发作开始：{project.get('eeg_marker_start') or '未填写'}",
+                        f"发作结束：{project.get('eeg_marker_end') or '未填写'}",
+                    ])
+                )
+            else:
+                self.hospital_summary.clear()
         if self.raw_tabs is not None:
             self.raw_tabs.clear()
         if video_path and os.path.exists(video_path):
@@ -511,6 +827,8 @@ class ImportPage(QWidget):
             values["signal_offset_ms"] = 0
         values["video_path"] = self.video_path_edit.text().strip() if self.video_path_edit is not None else ""
         values["watch_path"] = self.watch_path_edit.text().strip() if self.watch_path_edit is not None else ""
+        values["hospital_data_path"] = self.hospital_path_edit.text().strip() if self.hospital_path_edit is not None else ""
+        values["hospital_type"] = self.hospital_type_box.currentText() if self.hospital_type_box is not None else ""
         if values.get("patient_name"):
             values["name"] = values["patient_name"]
         return values
@@ -565,6 +883,82 @@ class ImportPage(QWidget):
                 self.db.save_media_file("watch", file_path)
                 self.save_current_project()
             self.load_watch_raw(file_path)
+
+    def choose_hospital_folder(self):
+        """选择医院视频脑电导出目录。"""
+        folder_path = QFileDialog.getExistingDirectory(
+            self,
+            "选择医院数据目录",
+            self.hospital_path_edit.text().strip() if self.hospital_path_edit is not None else "",
+        )
+        if not folder_path:
+            return
+        self.hospital_path_edit.setText(folder_path)
+        if self.db is not None:
+            self.db.save_media_file("hospital", folder_path)
+            self.save_current_project()
+
+    def start_hospital_time_extract(self):
+        """启动医院目录时间信息读取。"""
+        folder_path = self.hospital_path_edit.text().strip() if self.hospital_path_edit is not None else ""
+        if not folder_path:
+            QMessageBox.information(self, "提示", "请先选择医院数据目录")
+            return
+        if self.hospital_thread is not None:
+            QMessageBox.information(self, "提示", "正在读取医院时间信息，请稍候")
+            return
+
+        hospital_type = self.hospital_type_box.currentText() if self.hospital_type_box is not None else "自动识别"
+        if self.hospital_summary is not None:
+            self.hospital_summary.setText("正在读取医院数据目录，请稍候...")
+
+        self.hospital_thread = QThread(self)
+        self.hospital_worker = HospitalTimeWorker(folder_path, hospital_type)
+        self.hospital_worker.moveToThread(self.hospital_thread)
+        self.hospital_thread.started.connect(self.hospital_worker.run)
+        self.hospital_worker.finished.connect(self.apply_hospital_time_result)
+        self.hospital_worker.failed.connect(self.handle_hospital_time_error)
+        self.hospital_worker.finished.connect(self.hospital_thread.quit)
+        self.hospital_worker.failed.connect(self.hospital_thread.quit)
+        self.hospital_thread.finished.connect(self.hospital_worker.deleteLater)
+        self.hospital_thread.finished.connect(self.hospital_thread.deleteLater)
+        self.hospital_thread.finished.connect(self.clear_hospital_worker)
+        self.hospital_thread.start()
+
+    def apply_hospital_time_result(self, result):
+        """把医院目录读取结果写入当前项目字段。"""
+        for key in ["seizure_date", "video_start", "video_end", "eeg_marker_start", "eeg_marker_end"]:
+            edit = self.project_fields.get(key)
+            if edit is not None:
+                edit.setText(str(result.get(key) or ""))
+
+        hospital_type = result.get("hospital_type") or "自动识别"
+        if self.hospital_type_box is not None:
+            index = self.hospital_type_box.findText(hospital_type)
+            if index >= 0:
+                self.hospital_type_box.setCurrentIndex(index)
+        if self.hospital_path_edit is not None:
+            self.hospital_path_edit.setText(result.get("hospital_data_path") or self.hospital_path_edit.text().strip())
+        hospital_edit = self.project_fields.get("hospital")
+        hospital_name = result.get("hospital") or (hospital_type if hospital_type != "自动识别" else "")
+        if hospital_edit is not None and hospital_name:
+            hospital_edit.setText(str(hospital_name))
+        if self.hospital_summary is not None:
+            self.hospital_summary.setText(result.get("summary") or "读取完成")
+
+        self.save_current_project()
+        QMessageBox.information(self, "读取完成", "医院时间信息已写入当前项目")
+
+    def handle_hospital_time_error(self, message):
+        """展示医院目录读取失败信息。"""
+        if self.hospital_summary is not None:
+            self.hospital_summary.setText(f"读取失败：{message}")
+        QMessageBox.warning(self, "读取失败", message)
+
+    def clear_hospital_worker(self):
+        """清理医院时间读取线程引用。"""
+        self.hospital_thread = None
+        self.hospital_worker = None
 
     def load_video_raw(self, file_path):
         """函数说明：执行当前函数对应的业务逻辑。"""
@@ -892,6 +1286,12 @@ class AnnotationPage(QWidget):
         self.raw_signals = {}
         self.current_start_time_text = ""
         self.current_data_duration_ms = 60000
+        self.loaded_project_id = None
+        self.loaded_video_path = ""
+        self.loaded_watch_path = ""
+        self.loaded_watch_mtime = None
+        self.loaded_watch_signature = None
+        self.filtered_signal_cache = {}
         self.modality_order = ["ACC", "GYRO", "EMG", "PPG"]
         self.modality_settings = {
             name: {"visible": True, "hp": "", "lp": "", "notch": ""}
@@ -907,6 +1307,11 @@ class AnnotationPage(QWidget):
         self.last_saved_signal_offset_ms = None
         self.annotation_info = None
         self.annotation_type_box = None
+        self.auto_offset_btn = None
+        self.offset_progress_bar = None
+        self.offset_status_label = None
+        self.offset_thread = None
+        self.offset_worker = None
         self.annotation_types = self.db.list_annotation_types() if self.db is not None else ["癫痫"]
         project_id = self.app_state.get("project_id")
         self.annotation_records = self.db.list_annotations(project_id) if self.db is not None and project_id else []
@@ -1031,6 +1436,18 @@ class AnnotationPage(QWidget):
 
         pre_btn = make_blue_button("预标注")
         pre_btn.setMinimumHeight(36)
+        self.auto_offset_btn = make_white_button("自动获取偏移量")
+        self.auto_offset_btn.setMinimumHeight(36)
+        self.auto_offset_btn.clicked.connect(self.start_auto_offset_estimation)
+        self.offset_progress_bar = QProgressBar()
+        self.offset_progress_bar.setRange(0, 100)
+        self.offset_progress_bar.setValue(0)
+        self.offset_progress_bar.setTextVisible(True)
+        self.offset_progress_bar.setVisible(False)
+        self.offset_status_label = QLabel("")
+        self.offset_status_label.setObjectName("SubTitleLabel")
+        self.offset_status_label.setWordWrap(True)
+        self.offset_status_label.setVisible(False)
         self.annotation_type_box = QComboBox()
         self.annotation_type_box.addItems(self.annotation_types)
         self.annotation_type_box.setMinimumHeight(34)
@@ -1088,6 +1505,9 @@ class AnnotationPage(QWidget):
         nav_row.addWidget(next_btn)
 
         right_layout.addWidget(pre_btn)
+        right_layout.addWidget(self.auto_offset_btn)
+        right_layout.addWidget(self.offset_progress_bar)
+        right_layout.addWidget(self.offset_status_label)
         right_layout.addLayout(type_row)
         right_layout.addLayout(mark_row)
         right_layout.addWidget(info)
@@ -1148,11 +1568,13 @@ class AnnotationPage(QWidget):
 
     def refresh_loaded_data(self):
         """函数说明：执行当前函数对应的业务逻辑。"""
+        project_id = self.app_state.get("project_id")
+        project_changed = project_id != self.loaded_project_id
         if self.db is not None:
-            project_id = self.app_state.get("project_id")
             project = self.db.get_project(project_id) if project_id else self.db.get_current_project()
             if project:
                 project_id = project["id"]
+                project_changed = project_id != self.loaded_project_id
                 self.app_state["project_id"] = project_id
                 self.app_state["project"] = project
                 self.app_state["video_path"] = project.get("video_path") or ""
@@ -1172,18 +1594,29 @@ class AnnotationPage(QWidget):
         watch_path = self.app_state.get("watch_path")
 
         if video_path and os.path.exists(video_path):
-            self.load_video(video_path)
+            if project_changed or video_path != self.loaded_video_path or self.video_cap is None:
+                self.load_video(video_path)
         else:
             self.close_video_capture()
+            self.loaded_video_path = ""
             if self.video_area is not None:
                 self.video_area.clear()
                 self.video_area.setText("[ 请导入当前项目的视频文件 ]")
                 self.video_area.setToolTip("当前项目还没有可用视频")
 
         if watch_path and os.path.exists(watch_path):
-            self.load_watch_signals(watch_path)
+            if project_changed or self.should_reload_watch_data(watch_path):
+                self.load_watch_signals(watch_path)
+            else:
+                if self.wave is not None:
+                    self.wave.set_signal_offset(self.app_state.get("signal_offset_ms", 0))
+                self.update_offset_label()
         else:
             self.raw_signals = {}
+            self.loaded_watch_path = ""
+            self.loaded_watch_mtime = None
+            self.loaded_watch_signature = None
+            self.filtered_signal_cache.clear()
             self.current_start_time_text = ""
             self.current_data_duration_ms = 60000
             if self.wave is not None:
@@ -1194,6 +1627,28 @@ class AnnotationPage(QWidget):
             if self.energy_axis is not None:
                 self.energy_axis.set_energy([], 1.0, self.current_data_duration_ms, self.duration_ms)
             self.update_offset_label()
+        self.loaded_project_id = project_id
+
+    def should_reload_watch_data(self, watch_path):
+        """判断当前腕表数据是否需要重新读取。"""
+        project = self.app_state.get("project") or {}
+        signature = (
+            watch_path,
+            float(project.get("acc_fs") or 100.0),
+            float(project.get("gyro_fs") or 100.0),
+            float(project.get("emg_fs") or 200.0),
+            float(project.get("ppg_fs") or 25.0),
+        )
+        try:
+            mtime = os.path.getmtime(watch_path)
+        except OSError:
+            mtime = None
+        return (
+            watch_path != self.loaded_watch_path
+            or mtime != self.loaded_watch_mtime
+            or signature != self.loaded_watch_signature
+            or not self.raw_signals
+        )
 
     def current_position_ms(self):
         """函数说明：执行当前函数对应的业务逻辑。"""
@@ -1382,6 +1837,18 @@ class AnnotationPage(QWidget):
         if info_text:
             lines.append(f"项目信息：{info_text}")
             lines.append("")
+        seizure_date = str(project.get("seizure_date") or "").strip()
+        video_start = str(project.get("video_start") or "").strip()
+        eeg_start = str(project.get("eeg_marker_start") or "").strip()
+        eeg_end = str(project.get("eeg_marker_end") or "").strip()
+        if seizure_date or eeg_start or eeg_end:
+            date_text = seizure_date or "--"
+            ref_start = eeg_start or "--"
+            ref_end = eeg_end or "--"
+            lines.append(f"脑电参考：{date_text}  {ref_start} - {ref_end}")
+            if video_start:
+                lines.append(f"视频起点：{video_start}")
+            lines.append("")
         if self.pending_annotation_start_ms is not None:
             end_text = "--:--" if self.pending_annotation_end_ms is None else self.format_ms(self.pending_annotation_end_ms)
             lines.append(f"待保存标注：{self.format_ms(self.pending_annotation_start_ms)} - {end_text}")
@@ -1398,6 +1865,8 @@ class AnnotationPage(QWidget):
 
     def load_video(self, path):
         """函数说明：执行当前函数对应的业务逻辑。"""
+        if path == self.loaded_video_path and self.video_cap is not None:
+            return
         self.close_video_capture()
         self.video_path = path
 
@@ -1415,7 +1884,11 @@ class AnnotationPage(QWidget):
         self.video_frame_count = int(self.video_cap.get(cv2.CAP_PROP_FRAME_COUNT))
         self.current_frame_idx = -1
         self.play_timer.setInterval(30)
-        self.set_duration(self.get_video_duration_ms(path))
+        if self.video_fps > 0 and self.video_frame_count > 0:
+            self.set_duration(max(1, int(self.video_frame_count / self.video_fps * 1000)))
+        else:
+            self.set_duration(self.get_video_duration_ms(path))
+        self.loaded_video_path = path
         self.show_frame_at(0)
 
     def get_video_duration_ms(self, path):
@@ -1486,6 +1959,7 @@ class AnnotationPage(QWidget):
             data_duration_ms = max(data_duration_ms, int(len(ppg_value) / ppg_fs * 1000))
 
         self.raw_signals = raw_signals
+        self.filtered_signal_cache.clear()
         self.current_start_time_text = start_time_text
         self.current_data_duration_ms = max(1, data_duration_ms)
         self.modality_order = [name for name in ["ACC", "GYRO", "EMG", "PPG"] if name in raw_signals]
@@ -1503,6 +1977,19 @@ class AnnotationPage(QWidget):
             energy, energy_fs = self.calculate_energy_axis(energy_source[0], energy_source[1])
             self.energy_axis.set_energy(energy, energy_fs, data_duration_ms, self.duration_ms)
             self.energy_axis.setVisible(True)
+        project = self.app_state.get("project") or {}
+        self.loaded_watch_path = path
+        try:
+            self.loaded_watch_mtime = os.path.getmtime(path)
+        except OSError:
+            self.loaded_watch_mtime = None
+        self.loaded_watch_signature = (
+            path,
+            float(project.get("acc_fs") or 100.0),
+            float(project.get("gyro_fs") or 100.0),
+            float(project.get("emg_fs") or 200.0),
+            float(project.get("ppg_fs") or 25.0),
+        )
         self.update_offset_label()
 
     def open_modality_dialog(self):
@@ -1520,6 +2007,135 @@ class AnnotationPage(QWidget):
         if self.modality_select_check is not None:
             self.modality_select_check.setChecked(False)
 
+    def select_manual_roi(self, video_path):
+        """弹出 ROI 选择窗口并返回框选结果。"""
+        frame = read_video_first_frame(video_path)
+        dialog = RoiSelectionDialog(frame, self)
+        if dialog.exec_() != QDialog.Accepted:
+            return None
+        return dialog.selected_roi()
+
+    def get_eeg_reference_window_seconds(self, project):
+        """把项目里的视频开始/脑电开始结束时间换算成相对秒数。"""
+        video_start = str(project.get("video_start") or "").strip()
+        eeg_start = str(project.get("eeg_marker_start") or "").strip()
+        eeg_end = str(project.get("eeg_marker_end") or "").strip()
+        if not video_start or not eeg_start or not eeg_end:
+            raise RuntimeError("请先读取医院时间信息，确保已获得视频开始、脑电标记开始和脑电标记结束时间")
+        start_ms = ms_between_clock_times(video_start, eeg_start)
+        end_ms = ms_between_clock_times(video_start, eeg_end)
+        if start_ms is None or end_ms is None:
+            raise RuntimeError("无法把脑电参考时间换算为相对视频时间，请检查时间格式")
+        if end_ms <= start_ms:
+            raise RuntimeError("脑电标记结束时间必须晚于开始时间")
+        return start_ms / 1000.0, end_ms / 1000.0
+
+    def update_auto_offset_progress(self, percent, message):
+        """刷新自动偏移进度条和提示文本。"""
+        if self.offset_progress_bar is not None:
+            self.offset_progress_bar.setVisible(True)
+            self.offset_progress_bar.setValue(int(max(0, min(100, percent))))
+        if self.offset_status_label is not None:
+            self.offset_status_label.setVisible(True)
+            self.offset_status_label.setText(str(message or ""))
+
+    def start_auto_offset_estimation(self):
+        """启动视频和腕表数据的自动偏移估计。"""
+        if self.offset_thread is not None:
+            QMessageBox.information(self, "提示", "正在计算偏移量，请稍候")
+            return
+        video_path = self.app_state.get("video_path", "")
+        watch_path = self.app_state.get("watch_path", "")
+        if not video_path or not os.path.exists(video_path):
+            QMessageBox.warning(self, "缺少视频", "请先在当前项目中导入视频文件")
+            return
+        if not watch_path or not os.path.exists(watch_path):
+            QMessageBox.warning(self, "缺少腕表数据", "请先在当前项目中导入腕表数据文件")
+            return
+        project = self.app_state.get("project") or {}
+        try:
+            eeg_start_sec, eeg_end_sec = self.get_eeg_reference_window_seconds(project)
+        except Exception as exc:
+            QMessageBox.warning(self, "缺少脑电参考时间", str(exc))
+            return
+
+        try:
+            roi = self.select_manual_roi(video_path)
+        except Exception as exc:
+            QMessageBox.warning(self, "ROI 选择失败", str(exc))
+            return
+        if roi is None:
+            return
+
+        acc_fs = float(project.get("acc_fs") or 100.0)
+        gyro_fs = float(project.get("gyro_fs") or 100.0)
+
+        self.auto_offset_btn.setEnabled(False)
+        self.auto_offset_btn.setText("计算偏移中...")
+        self.update_auto_offset_progress(0, "已确认 ROI，准备开始计算...")
+        self.offset_thread = QThread(self)
+        self.offset_worker = OffsetEstimateWorker(
+            video_path,
+            watch_path,
+            roi,
+            eeg_start_sec,
+            eeg_end_sec,
+            acc_fs,
+            gyro_fs,
+        )
+        self.offset_worker.moveToThread(self.offset_thread)
+        self.offset_thread.started.connect(self.offset_worker.run)
+        self.offset_worker.progress.connect(self.update_auto_offset_progress)
+        self.offset_worker.finished.connect(self.apply_auto_offset_result)
+        self.offset_worker.failed.connect(self.handle_auto_offset_error)
+        self.offset_worker.finished.connect(self.offset_thread.quit)
+        self.offset_worker.failed.connect(self.offset_thread.quit)
+        self.offset_thread.finished.connect(self.cleanup_auto_offset_worker)
+        self.offset_thread.start()
+
+    def cleanup_auto_offset_worker(self):
+        """释放自动偏移计算线程对象。"""
+        if self.offset_worker is not None:
+            self.offset_worker.deleteLater()
+        if self.offset_thread is not None:
+            self.offset_thread.deleteLater()
+        self.offset_worker = None
+        self.offset_thread = None
+        if self.auto_offset_btn is not None:
+            self.auto_offset_btn.setEnabled(True)
+            self.auto_offset_btn.setText("自动获取偏移量")
+
+    def handle_auto_offset_error(self, message):
+        """显示自动偏移计算失败信息。"""
+        self.update_auto_offset_progress(0, f"自动偏移失败：{message}")
+        QMessageBox.warning(self, "自动偏移失败", message)
+
+    def apply_auto_offset_result(self, result):
+        """应用自动偏移结果，并同步到项目资料。"""
+        offset_ms = int(result.get("offset_ms", 0))
+        if self.wave is not None:
+            self.wave.set_signal_offset(offset_ms)
+        else:
+            self.app_state["signal_offset_ms"] = offset_ms
+        if self.db is not None and self.app_state.get("project_id"):
+            project = self.db.update_project(
+                self.app_state["project_id"],
+                signal_offset_ms=offset_ms,
+            )
+            self.app_state["project"] = project
+            self.app_state["signal_offset_ms"] = int(project.get("signal_offset_ms") or 0)
+        self.last_saved_signal_offset_ms = offset_ms
+        self.update_offset_label()
+        self.sync_annotation_overlay()
+        self.update_auto_offset_progress(100, "自动偏移完成，已同步到当前项目")
+        confidence = float(result.get("confidence", 0.0))
+        offset_s = offset_ms / 1000
+        QMessageBox.information(
+            self,
+            "自动偏移完成",
+            f"已更新偏移量：{offset_s:.2f}s\n置信度：{confidence:.3f}"
+        )
+
     def refresh_filtered_signals(self):
         """函数说明：执行当前函数对应的业务逻辑。"""
         signals = []
@@ -1531,7 +2147,18 @@ class AnnotationPage(QWidget):
             if not cfg.get("visible", True):
                 continue
             values, sample_rate = self.raw_signals[name]
-            filtered_values = self.apply_filters_to_signal(name, values, sample_rate, cfg)
+            cache_key = (
+                name,
+                float(sample_rate),
+                str(cfg.get("hp", "")),
+                str(cfg.get("lp", "")),
+                str(cfg.get("notch", "")),
+            )
+            if cache_key in self.filtered_signal_cache:
+                filtered_values = self.filtered_signal_cache[cache_key]
+            else:
+                filtered_values = self.apply_filters_to_signal(name, values, sample_rate, cfg)
+                self.filtered_signal_cache[cache_key] = filtered_values
             signals.append((name, filtered_values, sample_rate))
             visible_names.append(name)
 
@@ -1796,6 +2423,7 @@ class AnnotationPage(QWidget):
         if self.video_cap is not None:
             self.video_cap.release()
         self.video_cap = None
+        self.loaded_video_path = ""
 
     def update_sync_position(self, position_ms, force_wave=False):
         """函数说明：执行当前函数对应的业务逻辑。"""
